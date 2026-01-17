@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Facebook -->
+    <string name="facebook_app_id">INSERISCI_APP_ID</string>
+    <string name="facebook_client_token">INSERISCI_CLIENT_TOKEN</string>
+    <string name="fb_login_protocol_scheme">fbINSERISCI_APP_ID</string>
+</resources>
