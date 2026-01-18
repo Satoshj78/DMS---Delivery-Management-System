@@ -16,6 +16,12 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:dms_app/core/service/user/user_service.dart';
 import 'package:dms_app/core/service/media/dms_fullscreen_images_page.dart';
 import 'package:dms_app/core/ui/dms_tabs.dart';
+import 'package:dms_app/core/user_fields/hr_field_definition.dart';
+import 'package:dms_app/core/user_fields/hr_field_renderer.dart';
+import 'package:dms_app/core/user_fields/hr_policy.dart';
+import 'package:dms_app/core/user_fields/hr_policy_resolver.dart';
+import 'package:dms_app/core/user_fields/hr_policy_dialog.dart';
+import 'package:dms_app/core/user_fields/hr_field_types.dart';
 import 'dart:typed_data';
 
 
@@ -92,6 +98,34 @@ class _UserDetailPageState extends State<UserDetailPage> {
   bool _autoSyncedAuthPhoto = false;
 
   bool _editMode = false;
+
+  // ================= HR dynamic values =================
+  Map<String, dynamic> _userValues = {};
+  Map<String, dynamic> _memberValues = {};
+
+  // Alias per compatibilita con chiavi legacy del profilo
+  static const Map<String, String> _kHrUserKeyAlias = {
+    'firstName': 'nome',
+    'lastName': 'cognome',
+    'phone': 'telefono',
+    'codiceFiscale': 'codiceFiscale',
+    'nickname': 'nickname',
+    'thought': 'thought',
+  };
+
+  static const Map<String, String> _kHrMemberKeyAlias = {
+    'emailCompany': 'emailAziendale',
+    'hireDate': 'dataAssunzione',
+    'contractType': 'tipoContratto',
+    'jobRole': 'jobRole',
+    'department': 'comparto',
+    'employmentStatus': 'statoRapporto',
+    'terminationDate': 'dataCessazione',
+  };
+
+  String _mapHrKeyToUser(String hrKey) => _kHrUserKeyAlias[hrKey] ?? hrKey;
+  String _mapHrKeyToMember(String hrKey) => _kHrMemberKeyAlias[hrKey] ?? hrKey;
+
 
 
   static const double _kExpandedHeight = 300;
@@ -942,6 +976,32 @@ class _UserDetailPageState extends State<UserDetailPage> {
 
     _customGlobal = _map(p['custom']);
 
+    // ✅ Sync valori HR (flat) da controllers + profile
+    _userValues = Map<String, dynamic>.from(p);
+    // keep legacy mapped fields in sync
+    _userValues['nome'] = _nome.text.trim();
+    _userValues['cognome'] = _cognome.text.trim();
+    _userValues['nickname'] = _nickname.text.trim();
+    _userValues['thought'] = _thought.text.trim();
+    _userValues['telefono'] = _tel.text.trim();
+    _userValues['codiceFiscale'] = _cf.text.trim();
+    _userValues['ibanDefault'] = _ibanDefault.text.trim();
+    _userValues['emailSecondarie'] = List<String>.from(_emailsExtra);
+    _userValues['addressResidence'] = {
+      'formatted': [
+        _via.text.trim(),
+        _cap.text.trim(),
+        _citta.text.trim(),
+        _prov.text.trim(),
+        _naz.text.trim(),
+      ].where((e) => e.isNotEmpty).join(', '),
+      'street': _via.text.trim(),
+      'zip': _cap.text.trim(),
+      'city': _citta.text.trim(),
+      'province': _prov.text.trim(),
+      'country': _naz.text.trim(),
+    };
+
     // ✅ Foto profilo (priorità: profile.photoUrl > user.photoUrl)
     _photoUrl = _nullIfEmpty(_s(p['photoUrl'] ?? user['photoUrl']));
 
@@ -992,6 +1052,12 @@ class _UserDetailPageState extends State<UserDetailPage> {
         });
       }
     }
+
+    // ✅ Sync valori HR di lega (flat)
+    _memberValues = Map<String, dynamic>.from(member);
+    _memberValues['org'] = _map(member['org']);
+    _memberValues['overrides'] = _map(member['overrides']);
+
   }
 
 
@@ -1215,6 +1281,16 @@ class _UserDetailPageState extends State<UserDetailPage> {
 
     final uRef = FirebaseFirestore.instance.collection('Users').doc(widget.userId);
 
+    final viewerUid = FirebaseAuth.instance.currentUser?.uid;
+    final viewerRef = viewerUid == null
+        ? null
+        : FirebaseFirestore.instance
+        .collection('Leagues')
+        .doc(widget.leagueId)
+        .collection('members')
+        .doc(viewerUid);
+
+
     // =========================
     // Ctrl+Enter / Cmd+Enter (Salva)
     // =========================
@@ -1293,6 +1369,7 @@ class _UserDetailPageState extends State<UserDetailPage> {
 
             _lastUserData = user;
             _lastMemberData = member;
+            _viewerMemberData = member;
 
             if (!_inited) {
               _initFromUserAndMember(user, member);
@@ -1643,18 +1720,13 @@ class _UserDetailPageState extends State<UserDetailPage> {
       );
     }
 
-    // ✅ SELF: due tab “Pubblico / Privato”
+    // ✅ SELF: tab unica HR
     return DmsTabbedSection(
       tabs: [
         DmsTabSpec(
-          id: 'pubblico',
-          tab: const Tab(child: _TabLabel(icon: Icons.public, text: 'Pubblico')),
-          view: _tabAnagrafica(emailLogin, readOnly: readOnly),
-        ),
-        DmsTabSpec(
-          id: 'privato',
-          tab: const Tab(child: _TabLabel(icon: Icons.lock, text: 'Privato')),
-          view: _tabPrivate(readOnly: readOnly),
+          id: 'hr',
+          tab: const Tab(child: _TabLabel(icon: Icons.badge_outlined, text: 'HR')),
+          view: _tabHr(readOnly: readOnly),
         ),
       ],
     );
@@ -1703,569 +1775,662 @@ class _UserDetailPageState extends State<UserDetailPage> {
   }
 
 
+  // [REMOVED] _tabPrivate (replaced by HR renderer)
+
+  ) {
+  // Stesse chiavi usate sopra
+  const kNome = 'nome';
+  const kCognome = 'cognome';
+
+  const kTel = 'telefono';
+  const kEmailsExtra = 'emailSecondarie';
+
+  const kCf = 'codiceFiscale';
+  const kIban = 'ibanDefault';
+
+  const kVia = 'residenza.via';
+  const kCap = 'residenza.cap';
+  const kCitta = 'residenza.citta';
+  const kProv = 'residenza.provincia';
+  const kNaz = 'residenza.nazione';
+
+  final privateCustom = _customByPrivacy(wantPrivate: true);
+
+  // ---------- READ ONLY: solo private non vuoti + “con chi è condiviso” ----------
+  if (readOnly) {
+  final base = <_InfoItem>[];
+  if (_isPrivateField(kNome)) base.add(_InfoItem('Nome', _nome.text, fieldKey: kNome));
+  if (_isPrivateField(kCognome)) base.add(_InfoItem('Cognome', _cognome.text, fieldKey: kCognome));
+
+  final recapiti = <_InfoItem>[];
+  if (_isPrivateField(kTel)) recapiti.add(_InfoItem('Telefono', _tel.text, fieldKey: kTel));
+  if (_isPrivateField(kEmailsExtra)) {
+  recapiti.add(_InfoItem('Email 2°', _emailsExtra.join(', '), fieldKey: kEmailsExtra));
+  }
+
+  final anagrafica = <_InfoItem>[];
+  if (_isPrivateField(kCf)) anagrafica.add(_InfoItem('Cod. fiscale', _cf.text, fieldKey: kCf));
+  if (_isPrivateField(kIban)) anagrafica.add(_InfoItem('IBAN', _ibanDefault.text, fieldKey: kIban));
+
+  final residenza = <_InfoItem>[];
+  if (_isPrivateField(kVia)) residenza.add(_InfoItem('Via', _via.text, fieldKey: kVia));
+  if (_isPrivateField(kCap)) residenza.add(_InfoItem('CAP', _cap.text, fieldKey: kCap));
+  if (_isPrivateField(kCitta)) residenza.add(_InfoItem('Città', _citta.text, fieldKey: kCitta));
+  if (_isPrivateField(kProv)) residenza.add(_InfoItem('Provincia', _prov.text, fieldKey: kProv));
+  if (_isPrivateField(kNaz)) residenza.add(_InfoItem('Nazione', _naz.text, fieldKey: kNaz));
+
+  final extra = privateCustom.entries
+      .map((e) => _InfoItem(e.key, (e.value ?? '').toString(), fieldKey: 'custom.${e.key}'))
+      .toList();
+
+  return ListView(
+  padding: const EdgeInsets.all(14),
+  children: [
+  _readOnlyPrivateCard('DATI BASE (PRIVATE)', base),
+  _readOnlyPrivateCard('RECAPITI (PRIVATE)', recapiti),
+  _readOnlyPrivateCard('ANAGRAFICA (PRIVATE)', anagrafica),
+  _readOnlyPrivateCard('RESIDENZA (PRIVATE)', residenza),
+  _readOnlyPrivateCard('CAMPI EXTRA (PRIVATE)', extra),
+  const SizedBox(height: 18),
+  ],
+  );
+  }
+
+  // ---------- EDIT MODE: form solo dei campi PRIVATE (anche vuoti) ----------
+  return ListView(
+  padding: const EdgeInsets.all(14),
+  children: [
+  const Text('PRIVATE', style: TextStyle(fontWeight: FontWeight.w900)),
+  const SizedBox(height: 8),
+  const Text(
+  'Qui trovi i campi marcati come privati e puoi vedere/modificare la condivisione.',
+  style: TextStyle(fontWeight: FontWeight.w600),
+  ),
+  const SizedBox(height: 16),
+
+  const Text('DATI BASE', style: TextStyle(fontWeight: FontWeight.w800)),
+  const SizedBox(height: 10),
+
+  if (_isPrivateField(kNome))
+  TextField(
+  controller: _nome,
+  decoration: InputDecoration(
+  labelText: 'Nome *',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kNome, readOnly),
+  ),
+  ),
+  if (_isPrivateField(kNome)) const SizedBox(height: 10),
+
+  if (_isPrivateField(kCognome))
+  TextField(
+  controller: _cognome,
+  decoration: InputDecoration(
+  labelText: 'Cognome *',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kCognome, readOnly),
+  ),
+  ),
+
+  const SizedBox(height: 16),
+  const Text('RECAPITI', style: TextStyle(fontWeight: FontWeight.w800)),
+  const SizedBox(height: 10),
+
+  if (_isPrivateField(kTel))
+  TextField(
+  controller: _tel,
+  decoration: InputDecoration(
+  labelText: 'Telefono',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kTel, readOnly),
+  ),
+  ),
+  if (_isPrivateField(kTel)) const SizedBox(height: 10),
+
+  if (_isPrivateField(kEmailsExtra))
+  Column(
+  crossAxisAlignment: CrossAxisAlignment.start,
+  children: [
+  Row(
+  children: [
+  const Expanded(
+  child: Text('Email secondarie (PRIVATE)', style: TextStyle(fontWeight: FontWeight.w700)),
+  ),
+  IconButton(
+  tooltip: 'Privacy / Condivisione',
+  icon: const Icon(Icons.lock),
+  onPressed: () => _editFieldSharing(kEmailsExtra),
+  ),
+  ],
+  ),
+  _EmailsEditor(
+  title: '',
+  emails: _emailsExtra,
+  enabled: true,
+  onChanged: (v) => setState(() => _emailsExtra = v),
+  ),
+  ],
+  ),
+
+  const SizedBox(height: 16),
+  const Text('ANAGRAFICA', style: TextStyle(fontWeight: FontWeight.w800)),
+  const SizedBox(height: 10),
+
+  if (_isPrivateField(kCf))
+  TextField(
+  controller: _cf,
+  decoration: InputDecoration(
+  labelText: 'Codice fiscale',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kCf, readOnly),
+  ),
+  ),
+  if (_isPrivateField(kCf)) const SizedBox(height: 10),
+
+  if (_isPrivateField(kIban))
+  TextField(
+  controller: _ibanDefault,
+  decoration: InputDecoration(
+  labelText: 'IBAN (default)',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kIban, readOnly),
+  ),
+  ),
+
+  const SizedBox(height: 16),
+  const Text('RESIDENZA', style: TextStyle(fontWeight: FontWeight.w800)),
+  const SizedBox(height: 10),
+
+  if (_isPrivateField(kVia))
+  TextField(
+  controller: _via,
+  decoration: InputDecoration(
+  labelText: 'Via',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kVia, readOnly),
+  ),
+  ),
+  if (_isPrivateField(kVia)) const SizedBox(height: 10),
+
+  Row(
+  children: [
+  if (_isPrivateField(kCap))
+  Expanded(
+  child: TextField(
+  controller: _cap,
+  decoration: InputDecoration(
+  labelText: 'CAP',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kCap, readOnly),
+  ),
+  ),
+  ),
+  if (_isPrivateField(kCap)) const SizedBox(width: 10),
+  if (_isPrivateField(kCitta))
+  Expanded(
+  child: TextField(
+  controller: _citta,
+  decoration: InputDecoration(
+  labelText: 'Città',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kCitta, readOnly),
+  ),
+  ),
+  ),
+  ],
+  ),
+  const SizedBox(height: 10),
+
+  Row(
+  children: [
+  if (_isPrivateField(kProv))
+  Expanded(
+  child: TextField(
+  controller: _prov,
+  decoration: InputDecoration(
+  labelText: 'Provincia',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kProv, readOnly),
+  ),
+  ),
+  ),
+  if (_isPrivateField(kProv)) const SizedBox(width: 10),
+  if (_isPrivateField(kNaz))
+  Expanded(
+  child: TextField(
+  controller: _naz,
+  decoration: InputDecoration(
+  labelText: 'Nazione',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kNaz, readOnly),
+  ),
+  ),
+  ),
+  ],
+  ),
+
+  const SizedBox(height: 16),
+  _CustomFieldsEditor(
+  title: 'Campi extra (PRIVATE)',
+  data: privateCustom,
+  enabled: true,
+  onChanged: (m) => _mergeCustomFromEditor(m, subsetIsPrivate: true),
+  ),
+
+  const SizedBox(height: 16),
+  SizedBox(
+  height: 48,
+  child: ElevatedButton.icon(
+  onPressed: _saveGlobal,
+  icon: const Icon(Icons.save),
+  label: const Text('SALVA (PUBLIC + PRIVATE)'),
+  ),
+  ),
+
+  const SizedBox(height: 18),
+  ],
+  );
+  }
+
+
+  // [REMOVED] _tabAnagrafica (replaced by HR renderer)
+
+  ) {
+  // Chiavi campo (sharing)
+  const kNome = 'nome';
+  const kCognome = 'cognome';
+
+  const kTel = 'telefono';
+  const kEmailsExtra = 'emailSecondarie';
+
+  const kCf = 'codiceFiscale';
+  const kIban = 'ibanDefault';
+
+  const kVia = 'residenza.via';
+  const kCap = 'residenza.cap';
+  const kCitta = 'residenza.citta';
+  const kProv = 'residenza.provincia';
+  const kNaz = 'residenza.nazione';
+
+  final address = [
+  _via.text.trim(),
+  _cap.text.trim(),
+  _citta.text.trim(),
+  _prov.text.trim(),
+  _naz.text.trim(),
+  ].where((e) => e.isNotEmpty).join(', ');
+
+  final publicCustom = _customByPrivacy(wantPrivate: false);
+
+  // ---------- READ ONLY (pulito, non cliccabile, solo non vuoti) ----------
+  if (readOnly) {
+  final base = <_InfoItem>[];
+  if (_isPublicField(kNome)) base.add(_InfoItem('Nome', _nome.text));
+  if (_isPublicField(kCognome)) base.add(_InfoItem('Cognome', _cognome.text));
+  base.add(_InfoItem('Email login', emailLogin)); // sempre visibile
+
+  final recapiti = <_InfoItem>[];
+  if (_isPublicField(kTel)) recapiti.add(_InfoItem('Telefono', _tel.text));
+  if (_isPublicField(kEmailsExtra)) recapiti.add(_InfoItem('Email 2°', _emailsExtra.join(', ')));
+
+  final anagrafica = <_InfoItem>[];
+  if (_isPublicField(kCf)) anagrafica.add(_InfoItem('Cod. fiscale', _cf.text));
+  if (_isPublicField(kIban)) anagrafica.add(_InfoItem('IBAN', _ibanDefault.text));
+
+  final residenza = <_InfoItem>[];
+  if (_isPublicField(kVia)) residenza.add(_InfoItem('Via', _via.text));
+  if (_isPublicField(kCap)) residenza.add(_InfoItem('CAP', _cap.text));
+  if (_isPublicField(kCitta)) residenza.add(_InfoItem('Città', _citta.text));
+  if (_isPublicField(kProv)) residenza.add(_InfoItem('Provincia', _prov.text));
+  if (_isPublicField(kNaz)) residenza.add(_InfoItem('Nazione', _naz.text));
+
+  final extra = <_InfoItem>[
+  ...publicCustom.entries.map((e) => _InfoItem(e.key, (e.value ?? '').toString())),
+  ];
+
+  return ListView(
+  padding: const EdgeInsets.all(14),
+  children: [
+  _readOnlyCard('DATI BASE', base),
+  _readOnlyCard('RECAPITI', recapiti),
+  _readOnlyCard('ANAGRAFICA', anagrafica),
+  _readOnlyCard('RESIDENZA', residenza),
+  _readOnlyCard('CAMPI EXTRA (PUBLIC)', extra),
+
+  // niente cliccabile in readOnly → bottone disabilitato (o rimuovilo se preferisci)
+  if (address.trim().isNotEmpty)
+  OutlinedButton.icon(
+  onPressed: null, // readOnly = non cliccabile
+  icon: const Icon(Icons.navigation),
+  label: const Text('AVVIA NAVIGAZIONE (Google Maps)'),
+  ),
+
+  const SizedBox(height: 18),
+  ],
+  );
+  }
+
+  // ---------- EDIT MODE (form, mostra anche campi vuoti, solo PUBLIC) ----------
+  return ListView(
+  padding: const EdgeInsets.all(14),
+  children: [
+  const Text('DATI BASE', style: TextStyle(fontWeight: FontWeight.w800)),
+  const SizedBox(height: 10),
+
+  if (_isPublicField(kNome))
+  TextField(
+  controller: _nome,
+  readOnly: readOnly,
+  decoration: InputDecoration(
+  labelText: 'Nome *',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kNome, readOnly),
+  ),
+  ),
+  if (_isPublicField(kNome)) const SizedBox(height: 10),
+
+  if (_isPublicField(kCognome))
+  TextField(
+  controller: _cognome,
+  readOnly: readOnly,
+  decoration: InputDecoration(
+  labelText: 'Cognome *',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kCognome, readOnly),
+  ),
+  ),
+  if (_isPublicField(kCognome)) const SizedBox(height: 10),
+
+  TextField(
+  controller: _nickname,
+  readOnly: readOnly,
+  decoration: const InputDecoration(
+  labelText: 'Nickname',
+  border: OutlineInputBorder(),
+  // niente suffix privacy: è pubblico fisso
+  ),
+  ),
+  const SizedBox(height: 10),
+
+
+  TextFormField(
+  readOnly: true,
+  initialValue: emailLogin,
+  decoration: const InputDecoration(labelText: 'Email login', border: OutlineInputBorder()),
+  ),
+
+  const SizedBox(height: 16),
+  const Text('RECAPITI', style: TextStyle(fontWeight: FontWeight.w800)),
+  const SizedBox(height: 10),
+
+  if (_isPublicField(kTel))
+  TextField(
+  controller: _tel,
+  readOnly: readOnly,
+  decoration: InputDecoration(
+  labelText: 'Telefono',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kTel, readOnly),
+  ),
+  ),
+  if (_isPublicField(kTel)) const SizedBox(height: 10),
+
+  if (_isPublicField(kEmailsExtra))
+  Column(
+  crossAxisAlignment: CrossAxisAlignment.start,
+  children: [
+  Row(
+  children: [
+  const Expanded(
+  child: Text('Email secondarie (globali)', style: TextStyle(fontWeight: FontWeight.w700)),
+  ),
+  IconButton(
+  tooltip: 'Privacy / Condivisione',
+  icon: Icon(_isPrivateField(kEmailsExtra) ? Icons.lock : Icons.public),
+  onPressed: () => _editFieldSharing(kEmailsExtra),
+  ),
+  ],
+  ),
+  _EmailsEditor(
+  title: '',
+  emails: _emailsExtra,
+  enabled: !readOnly,
+  onChanged: (v) => setState(() => _emailsExtra = v),
+  ),
+  ],
+  ),
+
+  const SizedBox(height: 16),
+  const Text('ANAGRAFICA', style: TextStyle(fontWeight: FontWeight.w800)),
+  const SizedBox(height: 10),
+
+  if (_isPublicField(kCf))
+  TextField(
+  controller: _cf,
+  readOnly: readOnly,
+  decoration: InputDecoration(
+  labelText: 'Codice fiscale',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kCf, readOnly),
+  ),
+  ),
+  if (_isPublicField(kCf)) const SizedBox(height: 10),
+
+  if (_isPublicField(kIban))
+  TextField(
+  controller: _ibanDefault,
+  readOnly: readOnly,
+  decoration: InputDecoration(
+  labelText: 'IBAN (default)',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kIban, readOnly),
+  ),
+  ),
+
+  const SizedBox(height: 16),
+  const Text('RESIDENZA', style: TextStyle(fontWeight: FontWeight.w800)),
+  const SizedBox(height: 10),
+
+  if (_isPublicField(kVia))
+  TextField(
+  controller: _via,
+  readOnly: readOnly,
+  decoration: InputDecoration(
+  labelText: 'Via',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kVia, readOnly),
+  ),
+  ),
+  if (_isPublicField(kVia)) const SizedBox(height: 10),
+
+  Row(
+  children: [
+  if (_isPublicField(kCap))
+  Expanded(
+  child: TextField(
+  controller: _cap,
+  readOnly: readOnly,
+  decoration: InputDecoration(
+  labelText: 'CAP',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kCap, readOnly),
+  ),
+  ),
+  ),
+  if (_isPublicField(kCap)) const SizedBox(width: 10),
+  if (_isPublicField(kCitta))
+  Expanded(
+  child: TextField(
+  controller: _citta,
+  readOnly: readOnly,
+  decoration: InputDecoration(
+  labelText: 'Città',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kCitta, readOnly),
+  ),
+  ),
+  ),
+  ],
+  ),
+  const SizedBox(height: 10),
+
+  Row(
+  children: [
+  if (_isPublicField(kProv))
+  Expanded(
+  child: TextField(
+  controller: _prov,
+  readOnly: readOnly,
+  decoration: InputDecoration(
+  labelText: 'Provincia',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kProv, readOnly),
+  ),
+  ),
+  ),
+  if (_isPublicField(kProv)) const SizedBox(width: 10),
+  if (_isPublicField(kNaz))
+  Expanded(
+  child: TextField(
+  controller: _naz,
+  readOnly: readOnly,
+  decoration: InputDecoration(
+  labelText: 'Nazione',
+  border: const OutlineInputBorder(),
+  suffixIcon: _privacySuffix(kNaz, readOnly),
+  ),
+  ),
+  ),
+  ],
+  ),
+  const SizedBox(height: 10),
+
+  // In edit mode rimane cliccabile
+  OutlinedButton.icon(
+  onPressed: _launchMaps,
+  icon: const Icon(Icons.navigation),
+  label: const Text('AVVIA NAVIGAZIONE (Google Maps)'),
+  ),
+
+  const SizedBox(height: 16),
+  _CustomFieldsEditor(
+  title: 'Campi extra (PUBLIC)',
+  data: publicCustom,
+  enabled: !readOnly,
+  onChanged: (m) => _mergeCustomFromEditor(m, subsetIsPrivate: false),
+  ),
+
+  const SizedBox(height: 16),
+
+  // bottone SALVA solo in edit mode
+  if (!readOnly)
+  SizedBox(
+  height: 48,
+  child: ElevatedButton.icon(
+  onPressed: _saveGlobal,
+  icon: const Icon(Icons.save),
+  label: const Text('SALVA ANAGRAFICA'),
+  ),
+  ),
+
+  const SizedBox(height: 18),
+  ],
+  );
+  }
 
 
 
+  // ================= HR TAB (dinamico) =================
+  Widget _tabHr({required bool readOnly}) {
+    final viewerUid2 = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final viewerEmailLower = (FirebaseAuth.instance.currentUser?.email ?? '').toLowerCase();
+    final viewer = _buildViewerContext(
+      viewerUid: viewerUid2,
+      viewerEmailLower: viewerEmailLower,
+      targetUid: widget.userId,
+    );
 
-  Widget _tabPrivate({required bool readOnly}) {
-    // Stesse chiavi usate sopra
-    const kNome = 'nome';
-    const kCognome = 'cognome';
+    // editMode abilita UI edit, ma i permessi reali per campo vengono dal resolver
 
-    const kTel = 'telefono';
-    const kEmailsExtra = 'emailSecondarie';
 
-    const kCf = 'codiceFiscale';
-    const kIban = 'ibanDefault';
+    final categories = HrFieldCatalog.fields
+        .map((f) => f.category)
+        .toSet()
+        .toList()
+      ..sort();
 
-    const kVia = 'residenza.via';
-    const kCap = 'residenza.cap';
-    const kCitta = 'residenza.citta';
-    const kProv = 'residenza.provincia';
-    const kNaz = 'residenza.nazione';
-
-    final privateCustom = _customByPrivacy(wantPrivate: true);
-
-    // ---------- READ ONLY: solo private non vuoti + “con chi è condiviso” ----------
-    if (readOnly) {
-      final base = <_InfoItem>[];
-      if (_isPrivateField(kNome)) base.add(_InfoItem('Nome', _nome.text, fieldKey: kNome));
-      if (_isPrivateField(kCognome)) base.add(_InfoItem('Cognome', _cognome.text, fieldKey: kCognome));
-
-      final recapiti = <_InfoItem>[];
-      if (_isPrivateField(kTel)) recapiti.add(_InfoItem('Telefono', _tel.text, fieldKey: kTel));
-      if (_isPrivateField(kEmailsExtra)) {
-        recapiti.add(_InfoItem('Email 2°', _emailsExtra.join(', '), fieldKey: kEmailsExtra));
-      }
-
-      final anagrafica = <_InfoItem>[];
-      if (_isPrivateField(kCf)) anagrafica.add(_InfoItem('Cod. fiscale', _cf.text, fieldKey: kCf));
-      if (_isPrivateField(kIban)) anagrafica.add(_InfoItem('IBAN', _ibanDefault.text, fieldKey: kIban));
-
-      final residenza = <_InfoItem>[];
-      if (_isPrivateField(kVia)) residenza.add(_InfoItem('Via', _via.text, fieldKey: kVia));
-      if (_isPrivateField(kCap)) residenza.add(_InfoItem('CAP', _cap.text, fieldKey: kCap));
-      if (_isPrivateField(kCitta)) residenza.add(_InfoItem('Città', _citta.text, fieldKey: kCitta));
-      if (_isPrivateField(kProv)) residenza.add(_InfoItem('Provincia', _prov.text, fieldKey: kProv));
-      if (_isPrivateField(kNaz)) residenza.add(_InfoItem('Nazione', _naz.text, fieldKey: kNaz));
-
-      final extra = privateCustom.entries
-          .map((e) => _InfoItem(e.key, (e.value ?? '').toString(), fieldKey: 'custom.${e.key}'))
-          .toList();
-
-      return ListView(
-        padding: const EdgeInsets.all(14),
-        children: [
-          _readOnlyPrivateCard('DATI BASE (PRIVATE)', base),
-          _readOnlyPrivateCard('RECAPITI (PRIVATE)', recapiti),
-          _readOnlyPrivateCard('ANAGRAFICA (PRIVATE)', anagrafica),
-          _readOnlyPrivateCard('RESIDENZA (PRIVATE)', residenza),
-          _readOnlyPrivateCard('CAMPI EXTRA (PRIVATE)', extra),
-          const SizedBox(height: 18),
-        ],
-      );
-    }
-
-    // ---------- EDIT MODE: form solo dei campi PRIVATE (anche vuoti) ----------
     return ListView(
       padding: const EdgeInsets.all(14),
       children: [
-        const Text('PRIVATE', style: TextStyle(fontWeight: FontWeight.w900)),
-        const SizedBox(height: 8),
-        const Text(
-          'Qui trovi i campi marcati come privati e puoi vedere/modificare la condivisione.',
-          style: TextStyle(fontWeight: FontWeight.w600),
-        ),
-        const SizedBox(height: 16),
+        for (final cat in categories) ...[
+          _sectionHeader(cat),
+          const SizedBox(height: 6),
+          ...HrFieldCatalog.fields.where((f) => f.category == cat).map((field) {
+            final isUser = field.target == HrTarget.user;
+            final storageKey = isUser ? _mapHrKeyToUser(field.key) : _mapHrKeyToMember(field.key);
+            final current = isUser ? _userValues[storageKey] : _memberValues[storageKey];
 
-        const Text('DATI BASE', style: TextStyle(fontWeight: FontWeight.w800)),
-        const SizedBox(height: 10),
+            final policy = _getPolicyForField(
+              isUser: isUser,
+              storageKey: storageKey,
+              fieldSensitive: field.sensitive,
+            );
+            final canView = HrPolicyResolver.canView(policy: policy, viewer: viewer);
+            if (!canView) {
+              return const SizedBox.shrink();
+            }
+            final canEdit = _editMode && HrPolicyResolver.canEdit(policy: policy, viewer: viewer);
 
-        if (_isPrivateField(kNome))
-          TextField(
-            controller: _nome,
-            decoration: InputDecoration(
-              labelText: 'Nome *',
-              border: const OutlineInputBorder(),
-              suffixIcon: _privacySuffix(kNome, readOnly),
-            ),
-          ),
-        if (_isPrivateField(kNome)) const SizedBox(height: 10),
+            final canManagePolicy = _canManagePolicy(viewer, fieldSensitive: field.sensitive);
 
-        if (_isPrivateField(kCognome))
-          TextField(
-            controller: _cognome,
-            decoration: InputDecoration(
-              labelText: 'Cognome *',
-              border: const OutlineInputBorder(),
-              suffixIcon: _privacySuffix(kCognome, readOnly),
-            ),
-          ),
+            final fieldWidget = HrFieldRenderer(
 
-        const SizedBox(height: 16),
-        const Text('RECAPITI', style: TextStyle(fontWeight: FontWeight.w800)),
-        const SizedBox(height: 10),
-
-        if (_isPrivateField(kTel))
-          TextField(
-            controller: _tel,
-            decoration: InputDecoration(
-              labelText: 'Telefono',
-              border: const OutlineInputBorder(),
-              suffixIcon: _privacySuffix(kTel, readOnly),
-            ),
-          ),
-        if (_isPrivateField(kTel)) const SizedBox(height: 10),
-
-        if (_isPrivateField(kEmailsExtra))
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const Expanded(
-                    child: Text('Email secondarie (PRIVATE)', style: TextStyle(fontWeight: FontWeight.w700)),
-                  ),
-                  IconButton(
-                    tooltip: 'Privacy / Condivisione',
-                    icon: const Icon(Icons.lock),
-                    onPressed: () => _editFieldSharing(kEmailsExtra),
-                  ),
-                ],
-              ),
-              _EmailsEditor(
-                title: '',
-                emails: _emailsExtra,
-                enabled: true,
-                onChanged: (v) => setState(() => _emailsExtra = v),
-              ),
-            ],
-          ),
-
-        const SizedBox(height: 16),
-        const Text('ANAGRAFICA', style: TextStyle(fontWeight: FontWeight.w800)),
-        const SizedBox(height: 10),
-
-        if (_isPrivateField(kCf))
-          TextField(
-            controller: _cf,
-            decoration: InputDecoration(
-              labelText: 'Codice fiscale',
-              border: const OutlineInputBorder(),
-              suffixIcon: _privacySuffix(kCf, readOnly),
-            ),
-          ),
-        if (_isPrivateField(kCf)) const SizedBox(height: 10),
-
-        if (_isPrivateField(kIban))
-          TextField(
-            controller: _ibanDefault,
-            decoration: InputDecoration(
-              labelText: 'IBAN (default)',
-              border: const OutlineInputBorder(),
-              suffixIcon: _privacySuffix(kIban, readOnly),
-            ),
-          ),
-
-        const SizedBox(height: 16),
-        const Text('RESIDENZA', style: TextStyle(fontWeight: FontWeight.w800)),
-        const SizedBox(height: 10),
-
-        if (_isPrivateField(kVia))
-          TextField(
-            controller: _via,
-            decoration: InputDecoration(
-              labelText: 'Via',
-              border: const OutlineInputBorder(),
-              suffixIcon: _privacySuffix(kVia, readOnly),
-            ),
-          ),
-        if (_isPrivateField(kVia)) const SizedBox(height: 10),
-
-        Row(
-          children: [
-            if (_isPrivateField(kCap))
-              Expanded(
-                child: TextField(
-                  controller: _cap,
-                  decoration: InputDecoration(
-                    labelText: 'CAP',
-                    border: const OutlineInputBorder(),
-                    suffixIcon: _privacySuffix(kCap, readOnly),
-                  ),
-                ),
-              ),
-            if (_isPrivateField(kCap)) const SizedBox(width: 10),
-            if (_isPrivateField(kCitta))
-              Expanded(
-                child: TextField(
-                  controller: _citta,
-                  decoration: InputDecoration(
-                    labelText: 'Città',
-                    border: const OutlineInputBorder(),
-                    suffixIcon: _privacySuffix(kCitta, readOnly),
-                  ),
-                ),
-              ),
-          ],
-        ),
-        const SizedBox(height: 10),
-
-        Row(
-          children: [
-            if (_isPrivateField(kProv))
-              Expanded(
-                child: TextField(
-                  controller: _prov,
-                  decoration: InputDecoration(
-                    labelText: 'Provincia',
-                    border: const OutlineInputBorder(),
-                    suffixIcon: _privacySuffix(kProv, readOnly),
-                  ),
-                ),
-              ),
-            if (_isPrivateField(kProv)) const SizedBox(width: 10),
-            if (_isPrivateField(kNaz))
-              Expanded(
-                child: TextField(
-                  controller: _naz,
-                  decoration: InputDecoration(
-                    labelText: 'Nazione',
-                    border: const OutlineInputBorder(),
-                    suffixIcon: _privacySuffix(kNaz, readOnly),
-                  ),
-                ),
-              ),
-          ],
-        ),
-
-        const SizedBox(height: 16),
-        _CustomFieldsEditor(
-          title: 'Campi extra (PRIVATE)',
-          data: privateCustom,
-          enabled: true,
-          onChanged: (m) => _mergeCustomFromEditor(m, subsetIsPrivate: true),
-        ),
-
-        const SizedBox(height: 16),
-        SizedBox(
-          height: 48,
-          child: ElevatedButton.icon(
-            onPressed: _saveGlobal,
-            icon: const Icon(Icons.save),
-            label: const Text('SALVA (PUBLIC + PRIVATE)'),
-          ),
-        ),
-
-        const SizedBox(height: 18),
+              field: field,
+              value: current,
+              editable: canEdit,
+              onChanged: (hrKey, newValue) {
+                setState(() {
+                  if (isUser) {
+                    final k = _mapHrKeyToUser(hrKey);
+                    _userValues[k] = newValue;
+                    // mirror legacy controllers for core fields
+                    if (k == 'nome') _nome.text = (newValue ?? '').toString();
+                    if (k == 'cognome') _cognome.text = (newValue ?? '').toString();
+                    if (k == 'nickname') _nickname.text = (newValue ?? '').toString();
+                    if (k == 'thought') _thought.text = (newValue ?? '').toString();
+                    if (k == 'telefono') _tel.text = (newValue ?? '').toString();
+                    if (k == 'codiceFiscale') _cf.text = (newValue ?? '').toString();
+                    if (k == 'ibanDefault') _ibanDefault.text = (newValue ?? '').toString();
+                    if (k == 'addressResidence' && newValue is Map) {
+                      _via.text = (newValue['street'] ?? '').toString();
+                      _cap.text = (newValue['zip'] ?? '').toString();
+                      _citta.text = (newValue['city'] ?? '').toString();
+                      _prov.text = (newValue['province'] ?? '').toString();
+                      _naz.text = (newValue['country'] ?? '').toString();
+                    }
+                  } else {
+                    final k = _mapHrKeyToMember(hrKey);
+                    _memberValues[k] = newValue;
+                  }
+                });
+              },
+            );
+          }),
+          const SizedBox(height: 18),
+        ],
       ],
     );
   }
 
-  Widget _tabAnagrafica(String emailLogin, {required bool readOnly}) {
-    // Chiavi campo (sharing)
-    const kNome = 'nome';
-    const kCognome = 'cognome';
-
-    const kTel = 'telefono';
-    const kEmailsExtra = 'emailSecondarie';
-
-    const kCf = 'codiceFiscale';
-    const kIban = 'ibanDefault';
-
-    const kVia = 'residenza.via';
-    const kCap = 'residenza.cap';
-    const kCitta = 'residenza.citta';
-    const kProv = 'residenza.provincia';
-    const kNaz = 'residenza.nazione';
-
-    final address = [
-      _via.text.trim(),
-      _cap.text.trim(),
-      _citta.text.trim(),
-      _prov.text.trim(),
-      _naz.text.trim(),
-    ].where((e) => e.isNotEmpty).join(', ');
-
-    final publicCustom = _customByPrivacy(wantPrivate: false);
-
-    // ---------- READ ONLY (pulito, non cliccabile, solo non vuoti) ----------
-    if (readOnly) {
-      final base = <_InfoItem>[];
-      if (_isPublicField(kNome)) base.add(_InfoItem('Nome', _nome.text));
-      if (_isPublicField(kCognome)) base.add(_InfoItem('Cognome', _cognome.text));
-      base.add(_InfoItem('Email login', emailLogin)); // sempre visibile
-
-      final recapiti = <_InfoItem>[];
-      if (_isPublicField(kTel)) recapiti.add(_InfoItem('Telefono', _tel.text));
-      if (_isPublicField(kEmailsExtra)) recapiti.add(_InfoItem('Email 2°', _emailsExtra.join(', ')));
-
-      final anagrafica = <_InfoItem>[];
-      if (_isPublicField(kCf)) anagrafica.add(_InfoItem('Cod. fiscale', _cf.text));
-      if (_isPublicField(kIban)) anagrafica.add(_InfoItem('IBAN', _ibanDefault.text));
-
-      final residenza = <_InfoItem>[];
-      if (_isPublicField(kVia)) residenza.add(_InfoItem('Via', _via.text));
-      if (_isPublicField(kCap)) residenza.add(_InfoItem('CAP', _cap.text));
-      if (_isPublicField(kCitta)) residenza.add(_InfoItem('Città', _citta.text));
-      if (_isPublicField(kProv)) residenza.add(_InfoItem('Provincia', _prov.text));
-      if (_isPublicField(kNaz)) residenza.add(_InfoItem('Nazione', _naz.text));
-
-      final extra = <_InfoItem>[
-        ...publicCustom.entries.map((e) => _InfoItem(e.key, (e.value ?? '').toString())),
-      ];
-
-      return ListView(
-        padding: const EdgeInsets.all(14),
-        children: [
-          _readOnlyCard('DATI BASE', base),
-          _readOnlyCard('RECAPITI', recapiti),
-          _readOnlyCard('ANAGRAFICA', anagrafica),
-          _readOnlyCard('RESIDENZA', residenza),
-          _readOnlyCard('CAMPI EXTRA (PUBLIC)', extra),
-
-          // niente cliccabile in readOnly → bottone disabilitato (o rimuovilo se preferisci)
-          if (address.trim().isNotEmpty)
-            OutlinedButton.icon(
-              onPressed: null, // readOnly = non cliccabile
-              icon: const Icon(Icons.navigation),
-              label: const Text('AVVIA NAVIGAZIONE (Google Maps)'),
-            ),
-
-          const SizedBox(height: 18),
-        ],
-      );
-    }
-
-    // ---------- EDIT MODE (form, mostra anche campi vuoti, solo PUBLIC) ----------
-    return ListView(
-      padding: const EdgeInsets.all(14),
-      children: [
-        const Text('DATI BASE', style: TextStyle(fontWeight: FontWeight.w800)),
-        const SizedBox(height: 10),
-
-        if (_isPublicField(kNome))
-          TextField(
-            controller: _nome,
-            readOnly: readOnly,
-            decoration: InputDecoration(
-              labelText: 'Nome *',
-              border: const OutlineInputBorder(),
-              suffixIcon: _privacySuffix(kNome, readOnly),
-            ),
-          ),
-        if (_isPublicField(kNome)) const SizedBox(height: 10),
-
-        if (_isPublicField(kCognome))
-          TextField(
-            controller: _cognome,
-            readOnly: readOnly,
-            decoration: InputDecoration(
-              labelText: 'Cognome *',
-              border: const OutlineInputBorder(),
-              suffixIcon: _privacySuffix(kCognome, readOnly),
-            ),
-          ),
-        if (_isPublicField(kCognome)) const SizedBox(height: 10),
-
-        TextField(
-          controller: _nickname,
-          readOnly: readOnly,
-          decoration: const InputDecoration(
-            labelText: 'Nickname',
-            border: OutlineInputBorder(),
-            // niente suffix privacy: è pubblico fisso
-          ),
-        ),
-        const SizedBox(height: 10),
-
-
-        TextFormField(
-          readOnly: true,
-          initialValue: emailLogin,
-          decoration: const InputDecoration(labelText: 'Email login', border: OutlineInputBorder()),
-        ),
-
-        const SizedBox(height: 16),
-        const Text('RECAPITI', style: TextStyle(fontWeight: FontWeight.w800)),
-        const SizedBox(height: 10),
-
-        if (_isPublicField(kTel))
-          TextField(
-            controller: _tel,
-            readOnly: readOnly,
-            decoration: InputDecoration(
-              labelText: 'Telefono',
-              border: const OutlineInputBorder(),
-              suffixIcon: _privacySuffix(kTel, readOnly),
-            ),
-          ),
-        if (_isPublicField(kTel)) const SizedBox(height: 10),
-
-        if (_isPublicField(kEmailsExtra))
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const Expanded(
-                    child: Text('Email secondarie (globali)', style: TextStyle(fontWeight: FontWeight.w700)),
-                  ),
-                  IconButton(
-                    tooltip: 'Privacy / Condivisione',
-                    icon: Icon(_isPrivateField(kEmailsExtra) ? Icons.lock : Icons.public),
-                    onPressed: () => _editFieldSharing(kEmailsExtra),
-                  ),
-                ],
-              ),
-              _EmailsEditor(
-                title: '',
-                emails: _emailsExtra,
-                enabled: !readOnly,
-                onChanged: (v) => setState(() => _emailsExtra = v),
-              ),
-            ],
-          ),
-
-        const SizedBox(height: 16),
-        const Text('ANAGRAFICA', style: TextStyle(fontWeight: FontWeight.w800)),
-        const SizedBox(height: 10),
-
-        if (_isPublicField(kCf))
-          TextField(
-            controller: _cf,
-            readOnly: readOnly,
-            decoration: InputDecoration(
-              labelText: 'Codice fiscale',
-              border: const OutlineInputBorder(),
-              suffixIcon: _privacySuffix(kCf, readOnly),
-            ),
-          ),
-        if (_isPublicField(kCf)) const SizedBox(height: 10),
-
-        if (_isPublicField(kIban))
-          TextField(
-            controller: _ibanDefault,
-            readOnly: readOnly,
-            decoration: InputDecoration(
-              labelText: 'IBAN (default)',
-              border: const OutlineInputBorder(),
-              suffixIcon: _privacySuffix(kIban, readOnly),
-            ),
-          ),
-
-        const SizedBox(height: 16),
-        const Text('RESIDENZA', style: TextStyle(fontWeight: FontWeight.w800)),
-        const SizedBox(height: 10),
-
-        if (_isPublicField(kVia))
-          TextField(
-            controller: _via,
-            readOnly: readOnly,
-            decoration: InputDecoration(
-              labelText: 'Via',
-              border: const OutlineInputBorder(),
-              suffixIcon: _privacySuffix(kVia, readOnly),
-            ),
-          ),
-        if (_isPublicField(kVia)) const SizedBox(height: 10),
-
-        Row(
-          children: [
-            if (_isPublicField(kCap))
-              Expanded(
-                child: TextField(
-                  controller: _cap,
-                  readOnly: readOnly,
-                  decoration: InputDecoration(
-                    labelText: 'CAP',
-                    border: const OutlineInputBorder(),
-                    suffixIcon: _privacySuffix(kCap, readOnly),
-                  ),
-                ),
-              ),
-            if (_isPublicField(kCap)) const SizedBox(width: 10),
-            if (_isPublicField(kCitta))
-              Expanded(
-                child: TextField(
-                  controller: _citta,
-                  readOnly: readOnly,
-                  decoration: InputDecoration(
-                    labelText: 'Città',
-                    border: const OutlineInputBorder(),
-                    suffixIcon: _privacySuffix(kCitta, readOnly),
-                  ),
-                ),
-              ),
-          ],
-        ),
-        const SizedBox(height: 10),
-
-        Row(
-          children: [
-            if (_isPublicField(kProv))
-              Expanded(
-                child: TextField(
-                  controller: _prov,
-                  readOnly: readOnly,
-                  decoration: InputDecoration(
-                    labelText: 'Provincia',
-                    border: const OutlineInputBorder(),
-                    suffixIcon: _privacySuffix(kProv, readOnly),
-                  ),
-                ),
-              ),
-            if (_isPublicField(kProv)) const SizedBox(width: 10),
-            if (_isPublicField(kNaz))
-              Expanded(
-                child: TextField(
-                  controller: _naz,
-                  readOnly: readOnly,
-                  decoration: InputDecoration(
-                    labelText: 'Nazione',
-                    border: const OutlineInputBorder(),
-                    suffixIcon: _privacySuffix(kNaz, readOnly),
-                  ),
-                ),
-              ),
-          ],
-        ),
-        const SizedBox(height: 10),
-
-        // In edit mode rimane cliccabile
-        OutlinedButton.icon(
-          onPressed: _launchMaps,
-          icon: const Icon(Icons.navigation),
-          label: const Text('AVVIA NAVIGAZIONE (Google Maps)'),
-        ),
-
-        const SizedBox(height: 16),
-        _CustomFieldsEditor(
-          title: 'Campi extra (PUBLIC)',
-          data: publicCustom,
-          enabled: !readOnly,
-          onChanged: (m) => _mergeCustomFromEditor(m, subsetIsPrivate: false),
-        ),
-
-        const SizedBox(height: 16),
-
-        // bottone SALVA solo in edit mode
-        if (!readOnly)
-          SizedBox(
-            height: 48,
-            child: ElevatedButton.icon(
-              onPressed: _saveGlobal,
-              icon: const Icon(Icons.save),
-              label: const Text('SALVA ANAGRAFICA'),
-            ),
-          ),
-
-        const SizedBox(height: 18),
-      ],
+  Widget _sectionHeader(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 10, bottom: 6),
+      child: Text(
+        text.toUpperCase(),
+        style: const TextStyle(fontWeight: FontWeight.w700),
+      ),
     );
   }
-
-
 
 
 // ==========================================================
@@ -4199,6 +4364,84 @@ class _TabLabel extends StatelessWidget {
       ],
     );
   }
+
+  // =========================
+  // HR POLICY HELPERS
+  // =========================
+
+  HrViewerContext _buildViewerContext({
+    required String viewerUid,
+    required String viewerEmailLower,
+    required String targetUid,
+  }) {
+    final isSelf = viewerUid.isNotEmpty && viewerUid == targetUid;
+
+    final m = _viewerMemberData;
+    List<String> ls(dynamic v) => (v is List) ? v.map((e) => e.toString()).toList() : <String>[];
+    Map<String, dynamic> map(dynamic v) => (v is Map<String, dynamic>) ? v : <String, dynamic>{};
+
+    final roles = ls(m['roles']).isNotEmpty ? ls(m['roles']) : (m['role'] != null ? [m['role'].toString()] : <String>[]);
+    final comparti = ls(m['comparti']).isNotEmpty ? ls(m['comparti']) : (m['comparto'] != null ? [m['comparto'].toString()] : <String>[]);
+    final branches = ls(m['branches']).isNotEmpty ? ls(m['branches']) : (m['branchId'] != null ? [m['branchId'].toString()] : <String>[]);
+
+    final perms = ls(m['effectivePerms']).isNotEmpty ? ls(m['effectivePerms']) : ls(m['perms']);
+    final permsMap = map(m['permissions']);
+
+    bool hasPerm(String k) => perms.contains(k) || (permsMap[k] == true);
+
+    final isOwner = (m['isOwner'] == true) ||
+        roles.contains('OWNER') ||
+        (m['roleId']?.toString() == 'OWNER') ||
+        hasPerm('hr_admin') ||
+        hasPerm('members_manage') ||
+        hasPerm('hr_manage');
+
+    return HrViewerContext(
+      uid: viewerUid,
+      emailLower: viewerEmailLower,
+      isSelf: isSelf,
+      isOwnerOrAdmin: isOwner,
+      roles: roles,
+      comparti: comparti,
+      branches: branches,
+      effectivePerms: perms,
+    );
+  }
+
+  HrFieldPolicy _getPolicyForField({
+    required bool isUser,
+    required String storageKey,
+    required bool fieldSensitive,
+  }) {
+    final key = '${storageKey}__policy';
+    final raw = isUser ? _userValues[key] : _memberValues[key];
+    final fallback = fieldSensitive
+        ? HrFieldPolicy.defaultForSensitive()
+        : HrFieldPolicy.defaultForNonSensitive(allowLeague: true);
+    return HrFieldPolicy.fromMap(raw, fallback: fallback);
+  }
+
+  void _setPolicyForField({
+    required bool isUser,
+    required String storageKey,
+    required HrFieldPolicy policy,
+  }) {
+    final key = '${storageKey}__policy';
+    if (isUser) {
+      _userValues[key] = policy.toMap();
+    } else {
+      _memberValues[key] = policy.toMap();
+    }
+  }
+
+  bool _canManagePolicy(HrViewerContext viewer, {required bool fieldSensitive}) {
+    if (viewer.isOwnerOrAdmin) return true;
+    // self può cambiare visibilità solo per non sensibili (gestito nel dialog)
+    if (viewer.isSelf && !fieldSensitive) return true;
+    return false;
+  }
+
+
 }
 
 
