@@ -1,3 +1,6 @@
+// lib/core/service/user/user_service.dart
+// UserService: gestione profilo utente, privacy e sincronizzazione (Users + Leagues/*)
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/cupertino.dart';
@@ -54,6 +57,108 @@ class UserService {
   static List<String> _listStr(dynamic v) {
     if (v is List) {
       return v.map((e) => _s(e)).where((e) => e.isNotEmpty).toList();
+    }
+
+
+    // ----------------------------------------------------------
+    // Canonicalizzazione chiavi (EN -> IT) per evitare doppioni.
+    // Usata PRIMA di salvare profile, cosi' "birthDate" sparisce
+    // e rimane solo "dataNascita", ecc.
+    // ----------------------------------------------------------
+    static const Map<String, String> _keyAliasToIt = <String, String>{
+      // anagrafica
+      'firstName': 'nome',
+      'lastName': 'cognome',
+      'birthDate': 'dataNascita',
+      'placeOfBirth': 'luogoNascita',
+      'taxCode': 'codiceFiscale',
+      'fiscalCode': 'codiceFiscale',
+      'citizenship': 'cittadinanza',
+      'maritalStatus': 'statoCivile',
+
+      // contatti
+      'phone': 'telefono',
+      'phoneNumber': 'telefono',
+
+      // pensiero
+      'thought': 'pensiero',
+    };
+
+    static String _canonicalFieldKey(String raw) {
+      final k = _s(raw).trim();
+      if (k.isEmpty) return k;
+      if (k.startsWith('custom.')) return k;
+      return _keyAliasToIt[k] ?? k;
+    }
+
+    static Map<String, dynamic> canonicalizeProfileKeys(Map<String, dynamic> inMap) {
+      final out = <String, dynamic>{};
+
+      // 1) normalizza campi flat (livello 1)
+      for (final e in inMap.entries) {
+        final k = _canonicalFieldKey(e.key);
+        if (k.isEmpty) continue;
+        // se arrivano alias EN + IT, preferisci il valore IT gia' presente se non vuoto
+        if (!out.containsKey(k) || out[k] == null || (out[k] is String && (out[k] as String).trim().isEmpty)) {
+          out[k] = e.value;
+        }
+      }
+
+      // 2) normalizza privacy keys
+      final rawPrivacy = _map(out['privacy']);
+      if (rawPrivacy.isNotEmpty) {
+        final nextPrivacy = <String, dynamic>{};
+        for (final e in rawPrivacy.entries) {
+          final k = _canonicalFieldKey(e.key);
+          if (k.isEmpty) continue;
+          nextPrivacy[k] = e.value;
+        }
+        out['privacy'] = nextPrivacy;
+      }
+
+      // 3) rimuovi eventuali chiavi alias EN rimaste (sicurezza extra)
+      for (final k in _keyAliasToIt.keys) {
+        out.remove(k);
+      }
+
+      return out;
+    }
+
+    // Lettura robusta dei campi condivisi: se il doc ha "fields" lo usa,
+    // altrimenti fallback su root escludendo le chiavi di metadata.
+    static Map<String, dynamic> _extractFieldsFromSharedDoc(Map<String, dynamic>? data) {
+      final d = data ?? const <String, dynamic>{};
+      final f = d['fields'];
+      if (f is Map) return Map<String, dynamic>.from(f);
+
+      const metaKeys = <String>{
+        'uid',
+        'ownerUid',
+        'viewerUid',
+        'viewerEmailLower',
+        'leagueId',
+        'mode',
+        'displayName',
+        'displayNameLower',
+        'emailLower',
+        'createdAt',
+        'updatedAt',
+        'fields',
+        // access control
+        'allowedUids',
+        'allowedEmailsLower',
+        'allowLeagueMembers',
+        'allowSameComparto',
+        'ownerCompartoLower',
+        'allowSpecial',
+        'allowOwner',
+      };
+
+      final out = <String, dynamic>{};
+      d.forEach((k, v) {
+        if (!metaKeys.contains(k)) out[k] = v;
+      });
+      return out;
     }
     return <String>[];
   }
@@ -190,7 +295,7 @@ class UserService {
     final src = privacy ?? {};
 
     for (final e in src.entries) {
-      final k = _s(e.key);
+      final k = _canonicalFieldKey(_s(e.key));
       if (k.isEmpty) continue;
 
       // supporto: valore stringa diretto (es: "public")
@@ -319,13 +424,34 @@ class UserService {
       case 'coverUrl':
         return _nullIfEmpty(_s(profile['coverUrl']));
 
-    // altri campi
+    // ✅ chiavi base (supporta sia IT che alias EN gia' presenti)
+      case 'nickname':
+        return _nullIfEmpty(_s(profile['nickname']));
+      case 'pensiero':
+        return _nullIfEmpty(_s(profile['pensiero']));
+      case 'thought':
+      // legacy: se esiste ancora, preferisci pensiero
+        return _nullIfEmpty(_s(profile['pensiero'])) ?? _nullIfEmpty(_s(profile['thought']));
+
+    // ✅ HR / anagrafica
+      case 'dataNascita':
+        return _nullIfEmpty(_s(profile['dataNascita'])) ?? _nullIfEmpty(_s(anagrafica['dataNascita']));
+      case 'birthDate':
+        return _nullIfEmpty(_s(profile['dataNascita'])) ?? _nullIfEmpty(_s(profile['birthDate'])) ?? _nullIfEmpty(_s(anagrafica['dataNascita'])) ?? _nullIfEmpty(_s(anagrafica['birthDate']));
+
       case 'telefono':
-        return _nullIfEmpty(_s(recapiti['telefono']));
+        return _nullIfEmpty(_s(profile['telefono'])) ?? _nullIfEmpty(_s(recapiti['telefono']));
+      case 'phone':
+        return _nullIfEmpty(_s(profile['telefono'])) ?? _nullIfEmpty(_s(profile['phone'])) ?? _nullIfEmpty(_s(recapiti['telefono'])) ?? _nullIfEmpty(_s(recapiti['phone']));
+
       case 'ibanDefault':
-        return _nullIfEmpty(_s(anagrafica['ibanDefault']));
+        return _nullIfEmpty(_s(profile['ibanDefault'])) ?? _nullIfEmpty(_s(anagrafica['ibanDefault']));
+
       case 'codiceFiscale':
-        return _nullIfEmpty(_s(anagrafica['codiceFiscale']));
+        return _nullIfEmpty(_s(profile['codiceFiscale'])) ?? _nullIfEmpty(_s(anagrafica['codiceFiscale']));
+      case 'taxCode':
+        return _nullIfEmpty(_s(profile['codiceFiscale'])) ?? _nullIfEmpty(_s(profile['taxCode'])) ?? _nullIfEmpty(_s(anagrafica['codiceFiscale'])) ?? _nullIfEmpty(_s(anagrafica['taxCode']));
+
       case 'residenza':
         final r = Map<String, dynamic>.from(residenza);
         r.removeWhere((k, v) => _s(v).isEmpty);
@@ -464,9 +590,13 @@ class UserService {
     final nextPrivacy = (privacy == null) ? prevPrivacy : normalizePrivacy(privacy);
 
     // ✅ merge profilo (non perdere campi non passati)
-    final nextProfile = Map<String, dynamic>.from(prevProfile);
-    nextProfile.addAll(profile);
-    nextProfile['privacy'] = nextPrivacy;
+    final mergedProfile = Map<String, dynamic>.from(prevProfile);
+    mergedProfile.addAll(profile);
+    mergedProfile['privacy'] = nextPrivacy;
+
+    // ✅ canonicalizza chiavi (EN->IT) e rimuove alias EN
+    final nextProfile = canonicalizeProfileKeys(mergedProfile);
+    nextProfile['privacy'] = normalizePrivacy(_map(nextProfile['privacy']));
 
     final publicProfile = buildPublicProfile(nextProfile);
 
@@ -559,7 +689,8 @@ class UserService {
         'profile': nextProfile,
         'updatedAt': FieldValue.serverTimestamp(),
       },
-      SetOptions(merge: true),
+      // IMPORTANTISSIMO: sostituisce l'intero campo profile (spariscono le chiavi alias EN)
+      SetOptions(mergeFields: ['profile', 'updatedAt']),
     );
 
     // 2️⃣ sharedTo per utenti specifici
@@ -668,25 +799,25 @@ class UserService {
     // UsersPublic (safe)
     try {
       final p = await usersPublicRef(targetUid).get();
-      publicFields = _map(p.data()?['fields']);
+      publicFields = _extractFieldsFromSharedDoc(p.data());
     } catch (_) {}
 
     // shared in league (ALL MEMBERS)
     try {
       final a = await leagueSharedProfileAllRef(leagueId, targetUid).get();
-      leagueAllFields = _map(a.data()?['fields']);
+      leagueAllFields = _extractFieldsFromSharedDoc(a.data());
     } catch (_) {}
 
     // shared in league (PRIVILEGED / allowlist / comparti speciali)
     try {
       final l = await leagueSharedProfileRef(leagueId, targetUid).get();
-      leaguePrivFields = _map(l.data()?['fields']);
+      leaguePrivFields = _extractFieldsFromSharedDoc(l.data());
     } catch (_) {}
 
     // direct share (1-to-1)
     try {
       final d = await sharedToRef(targetUid, me.uid).get();
-      directFields = _map(d.data()?['fields']);
+      directFields = _extractFieldsFromSharedDoc(d.data());
     } catch (_) {}
 
     // merge priority: public < leagueAll < leaguePriv < direct

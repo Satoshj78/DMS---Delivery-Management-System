@@ -64,6 +64,11 @@ class _UsersPageState extends State<UsersPage> {
   String _createdByUid = '';
   bool _stickerMode = false;
 
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _selfUserSub;
+  String _selfUserPhotoUrl = '';
+  int _selfUserPhotoV = 0;
+
+
   // cache: uids membri della lega corrente (per capire se un risultato globale è già membro)
   Set<String> _memberUidSet = {};
 
@@ -117,8 +122,17 @@ class _UsersPageState extends State<UsersPage> {
     required String uid,
     required Map<String, dynamic> memberData,
   }) async {
+    // FOTO: usa members.photoUrl, altrimenti (solo self) Users.photoUrl, e solo se manca anche quello -> provider
     final rawPhoto = _displayPhotoUrl(uid, memberData);
-    final photoV = _asInt(memberData['photoV']);
+
+    final isSelf = uid == _authUser?.uid;
+    final memberHasPhoto = _s(memberData['photoUrl']).isNotEmpty;
+
+    // ✅ photoV corretto anche quando il fallback arriva da Users/{uid}
+    final photoV = (isSelf && !memberHasPhoto && _selfUserPhotoUrl.isNotEmpty)
+        ? _selfUserPhotoV
+        : _asInt(memberData['photoV']);
+
     final photo = rawPhoto.isNotEmpty ? _bust(rawPhoto, photoV) : '';
 
     final rawCover = _s(memberData['coverUrl']);
@@ -143,19 +157,25 @@ class _UsersPageState extends State<UsersPage> {
     );
   }
 
+
   @override
   void initState() {
     super.initState();
     _loadCreatedByUid();
+    _listenSelfUserDoc(); // ✅ prende la foto “vera” da Users/{uid}
   }
+
+
 
   @override
   void dispose() {
+    _selfUserSub?.cancel();
     _searchFocus.dispose();
     _listFocus.dispose();
     _listScroll.dispose();
     super.dispose();
   }
+
 
   Future<void> _loadCreatedByUid() async {
     try {
@@ -209,12 +229,20 @@ class _UsersPageState extends State<UsersPage> {
   }
 
   String _displayPhotoUrl(String uid, Map<String, dynamic> data) {
-    final photo = _s(data['photoUrl']);
-    if (photo.isNotEmpty) return photo;
+    final memberPhoto = _s(data['photoUrl']);
+    if (memberPhoto.isNotEmpty) return memberPhoto;
 
-    if (uid == _authUser?.uid) return _authPhotoUrl();
+    // ✅ Solo per me: prima usa la foto salvata su Users/{uid}
+    if (uid == _authUser?.uid) {
+      if (_selfUserPhotoUrl.isNotEmpty) return _selfUserPhotoUrl;
+
+      // ✅ Ultimo fallback: provider SOLO se non esiste una foto profilo salvata
+      return _authPhotoUrl();
+    }
+
     return '';
   }
+
 
   String _displayEmail(String uid, Map<String, dynamic> data) {
     final fromData = _s(data['emailLogin'] ?? data['email']);
@@ -260,15 +288,17 @@ class _UsersPageState extends State<UsersPage> {
     final me = FirebaseAuth.instance.currentUser;
 
     if (me != null && uid == me.uid) {
-      // ✅ Verifica solo che il membro esista, ma non scrivere su Firestore
       try {
-        await UserService.ensureMemberDoc(
-          leagueId: widget.leagueId,
-          uid: uid,
-        );
+        final ms = await _memberRef(uid).get();
+        if (!ms.exists) {
+          throw FirebaseException(
+            plugin: 'cloud_firestore',
+            code: 'not-a-member',
+            message: 'User is not a member of this league.',
+          );
+        }
       } on FirebaseException catch (e) {
         if (e.code == 'not-a-member') {
-          // ⚠️ opzionale: avviso all'utente
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
@@ -283,6 +313,7 @@ class _UsersPageState extends State<UsersPage> {
         }
       }
     }
+
 
     if (!context.mounted) return;
 
@@ -419,6 +450,8 @@ class _UsersPageState extends State<UsersPage> {
                           final nome = _s(r['nome']);
                           final cognome = _s(r['cognome']);
                           final email = _s(r['email']);
+
+                          // ✅ SOLO UsersPublic: niente provider fallback qui
                           final photoUrl = _s(r['photoUrl']);
                           final photoV = _asInt(r['photoV']);
                           final photo = photoUrl.isNotEmpty ? _bust(photoUrl, photoV) : '';
@@ -433,9 +466,7 @@ class _UsersPageState extends State<UsersPage> {
                             margin: const EdgeInsets.only(bottom: 10),
                             child: ListTile(
                               leading: CircleAvatar(
-                                backgroundImage: photo.isNotEmpty
-                                    ? CachedNetworkImageProvider(photo)
-                                    : null,
+                                backgroundImage: photo.isNotEmpty ? CachedNetworkImageProvider(photo) : null,
                                 child: photo.isEmpty ? const Icon(Icons.person) : null,
                               ),
                               title: Text(
@@ -492,6 +523,7 @@ class _UsersPageState extends State<UsersPage> {
                             ),
                           );
                         },
+
                       ),
                     ),
                   ],
@@ -827,4 +859,42 @@ class _UsersPageState extends State<UsersPage> {
       ),
     );
   }
+
+
+
+
+  void _listenSelfUserDoc() {
+    final uid = _authUser?.uid;
+    if (uid == null || uid.isEmpty) return;
+
+    _selfUserSub?.cancel();
+    _selfUserSub = FirebaseFirestore.instance
+        .collection('Users')
+        .doc(uid)
+        .snapshots()
+        .listen((snap) {
+      final d = snap.data() ?? {};
+      final url = _s(d['photoUrl']);
+      final v = _asInt(d['photoV']);
+
+      if (!mounted) return;
+      if (url == _selfUserPhotoUrl && v == _selfUserPhotoV) return;
+
+      setState(() {
+        _selfUserPhotoUrl = url;
+        _selfUserPhotoV = v;
+      });
+    });
+  }
+
+  DocumentReference<Map<String, dynamic>> _memberRef(String uid) {
+    return FirebaseFirestore.instance
+        .collection('Leagues')
+        .doc(widget.leagueId)
+        .collection('members')
+        .doc(uid);
+  }
+
+
+
 }

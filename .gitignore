@@ -52,3 +52,8 @@ lib/firebase_options.dart
 .firebaserc
 .firebase/
 **/GoogleService-Info.plist
+**/package-lock.json
+
+
+
+

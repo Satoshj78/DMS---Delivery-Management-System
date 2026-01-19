@@ -23,6 +23,8 @@ const ALWAYS_PUBLIC_FIELDS = new Set<string>([
   "nome",
   "cognome",
   "nickname",
+  // ✅ campo canonico IT. Manteniamo anche l'alias storico "thought" finché non migri i dati.
+  "pensiero",
   "thought",
 ]);
 
@@ -220,6 +222,8 @@ function memberPublicFields(pub: {
   const nickname = (pub.nickname ?? "").toString().trim();
   const displayName = (pub.displayName ?? "").toString().trim();
 
+  const displayNameLower = displayName.toLowerCase();
+
   const nomeLower = nome.toLowerCase();
   const cognomeLower = cognome.toLowerCase();
   const nicknameLower = nickname.toLowerCase();
@@ -233,6 +237,7 @@ function memberPublicFields(pub: {
     displayNomeLower: nomeLower,
     displayCognomeLower: cognomeLower,
     displayName,
+    displayNameLower,
     fullNameLower,
     reverseNameLower,
     nickname: nickname || null,
@@ -334,6 +339,61 @@ export const onUserProfileWrite = onDocumentWritten(
       : {};
     delete profileFieldPool.custom;
 
+
+
+    // ----------------------------------------------------
+    // 🔤 Canonicalizzazione chiavi (preferenza IT)
+    // Nota: NON modifica il documento Users (evita loop), ma normalizza ciò che PROPAGHIAMO.
+    // ----------------------------------------------------
+    const KEY_ALIAS_TO_IT: Record<string, string> = {
+      // anagrafica
+      firstName: "nome",
+      lastName: "cognome",
+      birthDate: "dataNascita",
+      placeOfBirth: "luogoNascita",
+      taxCode: "codiceFiscale",
+      fiscalCode: "codiceFiscale",
+      citizenship: "cittadinanza",
+      maritalStatus: "statoCivile",
+
+      // contatti
+      phone: "telefono",
+      phoneNumber: "telefono",
+
+      // campo pensiero
+      thought: "pensiero",
+    };
+
+    function canonicalFieldKey(raw: string): string {
+      const k = (raw ?? "").toString().trim();
+      if (!k) return k;
+      // privacy dei custom: custom.<key>
+      if (k.startsWith("custom.")) return k;
+      return KEY_ALIAS_TO_IT[k] ?? k;
+    }
+
+    function normalizeFlatKeys(src: Record<string, any>): Record<string, any> {
+      const out: Record<string, any> = {};
+      for (const [k, v] of Object.entries(src ?? {})) {
+        const ck = canonicalFieldKey(k);
+        // se arrivano sia alias EN che IT, preferisci IT se già presente e non vuoto
+        if (out[ck] == null || out[ck] === "") out[ck] = v;
+      }
+      return out;
+    }
+
+    function normalizePrivacyKeys(src: Record<string, any>): Record<string, any> {
+      const out: Record<string, any> = {};
+      for (const [k, v] of Object.entries(src ?? {})) {
+        const ck = canonicalFieldKey(k);
+        out[ck] = v;
+      }
+      return out;
+    }
+
+    const profileFieldPoolEff = normalizeFlatKeys(profileFieldPool);
+    const profilePrivacyEff = normalizePrivacyKeys(profilePrivacy);
+
     const derivedPublic = memberPublicFields(pub);
 
     function safeModeRaw(v: any): string {
@@ -349,7 +409,7 @@ export const onUserProfileWrite = onDocumentWritten(
       // ✅ campi sempre pubblici
       if (ALWAYS_PUBLIC_FIELDS.has(fieldKey)) return "public";
 
-      const s = (profilePrivacy?.[fieldKey] ?? {}) as Record<string, any>;
+      const s = (profilePrivacyEff?.[fieldKey] ?? {}) as Record<string, any>;
       const rawMode = safeModeRaw(s?.mode);
 
       const hasEmails = Array.isArray(s?.emails) && s.emails.length > 0;
@@ -387,7 +447,7 @@ export const onUserProfileWrite = onDocumentWritten(
       const out: Record<string, any> = {};
 
       // Top-level profile fields (flat)
-      for (const [k, v] of Object.entries(profileFieldPool)) {
+      for (const [k, v] of Object.entries(profileFieldPoolEff)) {
         if (BLOCKED_KEYS.has(k)) continue;
         const mode = getMode(k);
         if (allowedModes.includes(mode)) out[k] = v;
@@ -408,7 +468,12 @@ export const onUserProfileWrite = onDocumentWritten(
     }
 
     function realFieldCount(payload: Record<string, any>) {
-      // uid + updatedAt non contano
+      // Se il payload usa lo schema {fields:{...}}, conta SOLO i campi visibili.
+      const f = (payload as any).fields;
+      if (f && typeof f === 'object' && !Array.isArray(f)) {
+        return Object.keys(f as any).length;
+      }
+      // Fallback legacy: uid + updatedAt non contano
       return Math.max(0, Object.keys(payload).length - 2);
     }
 
@@ -441,32 +506,41 @@ export const onUserProfileWrite = onDocumentWritten(
     const profileLeague = filterProfileByModes(["league"]);
     const profileShared = filterProfileByModes(["emails", "uids", "owner", "special", "comparto"]);
 
-    // UsersPublic + members: campi public + derived (nome/cognome/search + immagini)
-    const payloadPublic = {
+    // Members: campi public + derived (flat) — serve per liste/ordinamenti
+    const payloadPublicMembers = {
       uid,
       ...profilePublic,
       ...derivedPublic,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
-    // sharedProfilesAll: SOLO league
-    const payloadLeague = {
+    // UsersPublic: standardizza → fields: {...} + metadata/search al root
+    const payloadUsersPublic = {
       uid,
-      ...profileLeague,
+      fields: profilePublic,
+      ...derivedPublic,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
-    // sharedProfiles: SOLO emails/uids/owner/special/comparto
+    // sharedProfilesAll: SOLO league (fields)
+    const payloadLeague = {
+      uid,
+      fields: profileLeague,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    // sharedProfiles: SOLO emails/uids/owner/special/comparto (fields)
     const payloadSharedBase = {
       uid,
-      ...profileShared,
+      fields: profileShared,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
     // ----------------------------------------------------
     // 1️⃣ UsersPublic — SOLO PUBLIC (delete se vuoto)
+    // ---------------------------------------------------- — SOLO PUBLIC (delete se vuoto)
     // ----------------------------------------------------
-    await applyUpsertOrDelete(db.collection("UsersPublic").doc(uid), payloadPublic, `UsersPublic/${uid}`);
+    await applyUpsertOrDelete(db.collection("UsersPublic").doc(uid), payloadUsersPublic, `UsersPublic/${uid}`);
 
     // ----------------------------------------------------
     // 2️⃣ Members — SOLO PUBLIC + PULIZIA CAMPI RIMOSSI
@@ -481,13 +555,13 @@ export const onUserProfileWrite = onDocumentWritten(
     }
 
     // Chiavi “profilo public” correnti (incl. derived)
-    const publicKeysNow = new Set(Object.keys(payloadPublic));
+    const publicKeysNow = new Set(Object.keys(payloadPublicMembers));
 
     for (const doc of membersQs.docs) {
       try {
         // 1) merge dei campi public correnti
-        if (realFieldCount(payloadPublic) > 0) {
-          await doc.ref.set(payloadPublic, { merge: true });
+        if (realFieldCount(payloadPublicMembers) > 0) {
+          await doc.ref.set(payloadPublicMembers, { merge: true });
         }
 
         // 2) pulizia: rimuovo campi “profilo” che non sono più public
@@ -535,7 +609,7 @@ export const onUserProfileWrite = onDocumentWritten(
     // Targets: union di email/uids presenti nelle regole privacy
     const emailTargets = Array.from(
       new Set(
-        Object.values(profilePrivacy)
+        Object.values(profilePrivacyEff)
           .flatMap((v: any) => (Array.isArray(v?.emails) ? v.emails : []))
           .map((e: any) => (e ?? "").toString().trim().toLowerCase())
           .filter(Boolean)
@@ -544,16 +618,16 @@ export const onUserProfileWrite = onDocumentWritten(
 
 const uidTargets = Array.from(
 new Set(
-        Object.values(profilePrivacy)
+        Object.values(profilePrivacyEff)
           .flatMap((v: any) => (Array.isArray(v?.uids) ? v.uids : []))
           .map((x: any) => (x ?? "").toString().trim())
           .filter(Boolean)
 )
 );
 
-const wantsComparto = Object.values(profilePrivacy).some((v: any) => safeModeRaw(v?.mode) === "comparto");
-const wantsOwner = Object.values(profilePrivacy).some((v: any) => safeModeRaw(v?.mode) === "owner");
-const wantsSpecial = Object.values(profilePrivacy).some((v: any) => safeModeRaw(v?.mode) === "special");
+const wantsComparto = Object.values(profilePrivacyEff).some((v: any) => safeModeRaw(v?.mode) === "comparto");
+const wantsOwner = Object.values(profilePrivacyEff).some((v: any) => safeModeRaw(v?.mode) === "owner");
+const wantsSpecial = Object.values(profilePrivacyEff).some((v: any) => safeModeRaw(v?.mode) === "special");
 
 // ----------------------------------------------------
 // 3️⃣ sharePreferences + sharedProfilesAll + sharedProfiles
@@ -566,7 +640,7 @@ for (const leagueId of leagueIds) {
         {
           uid,
           allLeaguesScope: allLeaguesScope ?? {},
-          fieldSharing: profilePrivacy ?? {},
+          fieldSharing: profilePrivacyEff ?? {},
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         },
         { merge: true }

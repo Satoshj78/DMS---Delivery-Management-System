@@ -1,0 +1,259 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // -----------------------
+    // HELPERS
+    // -----------------------
+    function signedIn() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+
+    function myEmailLower() {
+      return signedIn() && request.auth.token.email != null
+        ? request.auth.token.email.lower()
+        : "";
+    }
+
+    function leaguePath(leagueId) {
+      return /databases/$(database)/documents/Leagues/$(leagueId);
+    }
+    function memberPath(leagueId, userId) {
+      return /databases/$(database)/documents/Leagues/$(leagueId)/members/$(userId);
+    }
+    function rolePath(leagueId, roleId) {
+      return /databases/$(database)/documents/Leagues/$(leagueId)/roles/$(roleId);
+    }
+    function userPath(userId) {
+      return /databases/$(database)/documents/Users/$(userId);
+    }
+
+    function isMember(leagueId) {
+      return signedIn() && exists(memberPath(leagueId, uid()));
+    }
+
+    function isCreator(leagueId) {
+      return signedIn() && (get(leaguePath(leagueId)).data.createdByUid == uid());
+    }
+
+    // Safe getter data member corrente (solo se membro)
+    function myMemberData(leagueId) {
+      return get(memberPath(leagueId, uid())).data;
+    }
+
+    function myRoleId(leagueId) {
+      return isMember(leagueId) && myMemberData(leagueId).roleId != null
+        ? myMemberData(leagueId).roleId
+        : "";
+    }
+
+    // Permesso nel ruolo corrente (permissions.{key} == true)
+    function hasRolePerm(leagueId, permKey) {
+  return isMember(leagueId)
+    && myRoleId(leagueId) != ""
+    && exists(rolePath(leagueId, myRoleId(leagueId)))
+    && (get(rolePath(leagueId, myRoleId(leagueId))).data.permissions is map)
+    && get(rolePath(leagueId, myRoleId(leagueId))).data.permissions[permKey] == true;
+}
+
+
+    function canManageMembers(leagueId) {
+      return isCreator(leagueId) || hasRolePerm(leagueId, "members_manage");
+    }
+
+    function canManageInvites(leagueId) {
+      return isCreator(leagueId) || hasRolePerm(leagueId, "invites_manage");
+    }
+
+    function canManageRoles(leagueId) {
+      return isCreator(leagueId) || hasRolePerm(leagueId, "roles_manage");
+    }
+
+    function canReadSensitive(leagueId) {
+      // “special” = chi ha permesso members_sensitive_read
+      return isCreator(leagueId) || hasRolePerm(leagueId, "members_sensitive_read");
+    }
+
+    function myCompartoLower(leagueId) {
+      return isMember(leagueId) && myMemberData(leagueId).compartoLower != null
+        ? myMemberData(leagueId).compartoLower
+        : "";
+    }
+
+    // =====================================================
+    // ✅ USERS — unica fonte modificabile da client
+    // =====================================================
+    match /Users/{userId} {
+  function activeId(d) {
+    return d.activeLeagueId != null ? d.activeLeagueId : "";
+  }
+
+  function validActiveLeagueChange() {
+    // old vs new
+    return activeId(request.resource.data) == activeId(resource.data)
+      // allow clear
+      || activeId(request.resource.data) == ""
+      // allow set only if member of that league
+      || exists(memberPath(activeId(request.resource.data), uid()));
+  }
+
+  allow read: if signedIn() && uid() == userId;
+
+  // create: ok (di solito activeLeagueId sarà "" all’inizio)
+  allow create: if signedIn() && uid() == userId;
+
+  // update: vincola solo activeLeagueId, il resto rimane libero
+  allow update: if signedIn() && uid() == userId && validActiveLeagueChange();
+
+  allow delete: if signedIn() && uid() == userId;
+
+  match /sharedTo/{viewerUid} {
+  allow read: if signedIn() && (uid() == userId || uid() == viewerUid);
+  allow write: if signedIn() && uid() == userId;
+}
+
+match /sharedToEmails/{emailLower} {
+  allow read: if signedIn() && (uid() == userId || myEmailLower() == emailLower);
+  allow write: if signedIn() && uid() == userId;
+}
+
+match /sharedToLeagues/{leagueId} {
+  allow read: if signedIn() && (uid() == userId || exists(memberPath(leagueId, uid())));
+  allow write: if signedIn() && uid() == userId;
+}
+
+
+  match /fcmTokens/{tokenId} {
+    allow create, update, delete: if signedIn() && uid() == userId;
+    allow read: if false;
+  }
+}
+
+
+    // =====================================================
+    // ✅ USERSPUBLIC — scrive solo la Function
+    // =====================================================
+    match /UsersPublic/{userId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    // =====================================================
+    // ✅ LEAGUES
+    // =====================================================
+    match /Leagues/{leagueId} {
+      allow read: if signedIn() && (isMember(leagueId) || isCreator(leagueId));
+      allow create, update, delete: if false;
+
+      // ---------------------------
+      // MEMBERS — aggiornati solo da Function
+      // ---------------------------
+      match /members/{memberUid} {
+        allow read: if signedIn() && (isMember(leagueId) || isCreator(leagueId));
+        allow write: if false;
+      }
+
+      // ---------------------------
+      // PROFILE FIELD DEFINITIONS (campi dinamici per lega)
+      // - read: tutti i membri
+      // - write: owner o chi ha members_manage
+      // ---------------------------
+      match /profileFieldDefs/{fieldId} {
+        allow read: if signedIn() && (isMember(leagueId) || isCreator(leagueId));
+        allow write: if signedIn() && canManageMembers(leagueId);
+      }
+
+      // ---------------------------
+      // SHARE PREFERENCES (debug/inspection - opzionale)
+      // - read: self oppure owner/manager
+      // - write: solo function
+      // ---------------------------
+      match /sharePreferences/{prefUid} {
+        allow read: if signedIn() && (
+          uid() == prefUid
+          || canManageMembers(leagueId)
+        );
+        allow write: if false;
+      }
+
+      // ---------------------------
+      // SHARED PROFILES ALL — per tutta la lega (mode=league)
+      // ---------------------------
+      match /sharedProfilesAll/{profileUid} {
+        allow read: if signedIn() && (isMember(leagueId) || isCreator(leagueId));
+        allow write: if false;
+      }
+
+      // ---------------------------
+      // SHARED PROFILES — ristretti per UID/email/comparto/special/owner
+      // ---------------------------
+      match /sharedProfiles/{profileUid} {
+        allow read: if signedIn() && (
+          // Owner (creator) vede sempre
+          isCreator(leagueId)
+
+          // Membri: vedono solo se matchano una delle condizioni
+          || (isMember(leagueId) && (
+            // 1) condiviso a tutti i membri (se lo usi)
+            resource.data.allowLeagueMembers == true
+
+            // 2) share by UID
+            || ((resource.data.allowedUids is list)
+              && resource.data.allowedUids.hasAny([uid()]))
+
+            // 3) share by email
+            || ((resource.data.allowedEmailsLower is list)
+              && resource.data.allowedEmailsLower.hasAny([myEmailLower()]))
+
+            // 4) share "comparto"
+            || (resource.data.allowSameComparto == true
+              && resource.data.ownerCompartoLower == myCompartoLower(leagueId))
+
+            // 5) share "special" (ruolo con permesso members_sensitive_read)
+            || (resource.data.allowSpecial == true
+              && canReadSensitive(leagueId))
+
+            // 6) share "owner"
+            || (resource.data.allowOwner == true
+              && isCreator(leagueId))
+          ))
+        );
+
+        allow write: if false;
+      }
+
+      // ---------------------------
+      // INVITES
+      // ---------------------------
+      match /invites/{inviteId} {
+  allow read: if signedIn() && (
+    canManageInvites(leagueId)
+    || resource.data.emailLower == myEmailLower()
+    || resource.data.toEmailLower == myEmailLower()
+  );
+  allow create, update, delete: if signedIn() && canManageInvites(leagueId);
+}
+
+
+      // ---------------------------
+      // JOIN REQUESTS
+      // ---------------------------
+      match /joinRequests/{requestId} {
+        allow create: if signedIn() && uid() == requestId;
+        allow read: if signedIn() && (
+  uid() == requestId
+  || canManageMembers(leagueId)
+);
+
+        allow update, delete: if signedIn() && isCreator(leagueId);
+      }
+
+      // ---------------------------
+      // ROLES
+      // ---------------------------
+      match /roles/{roleId} {
+        allow read: if signedIn() && (isMember(leagueId) || isCreator(leagueId));
+        allow create, update, delete: if signedIn() && canManageRoles(leagueId);
+      }
+    }
+  }
+}

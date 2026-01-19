@@ -21,28 +21,47 @@ class ActiveLeagueService {
 
     final email = (user.email ?? '').trim();
     final emailLower = email.toLowerCase();
+    final providerUrl = (user.photoURL ?? '').trim();
+
+    final existing = snap.data() ?? {};
+    final existingPhoto = (existing['photoUrl'] ?? '').toString().trim();
+    final hasUserPhoto = existingPhoto.isNotEmpty;
 
     if (!snap.exists) {
+      // Primo ingresso: puoi inizializzare photoUrl col provider (fallback iniziale),
+      // ma resta sempre modificabile dall’upload utente.
       await ref.set({
         'uid': user.uid,
         'email': email,
         'emailLower': emailLower,
         'displayName': user.displayName ?? '',
-        'photoUrl': user.photoURL,
+        if (providerUrl.isNotEmpty) 'providerPhotoUrl': providerUrl,
+        if (providerUrl.isNotEmpty) 'photoUrl': providerUrl, // fallback solo alla creazione
         'createdAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
         'activeLeagueId': '',
       }, SetOptions(merge: true));
     } else {
-      await ref.set({
+      // ✅ Login successivi: MAI sovrascrivere photoUrl se già c’è una foto utente
+      final patch = <String, dynamic>{
         'email': email,
         'emailLower': emailLower,
-        'displayName': user.displayName ?? (snap.data()?['displayName'] ?? ''),
-        'photoUrl': user.photoURL ?? snap.data()?['photoUrl'],
+        'displayName': (user.displayName ?? '').trim().isNotEmpty
+            ? (user.displayName ?? '')
+            : (existing['displayName'] ?? ''),
         'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+        if (providerUrl.isNotEmpty) 'providerPhotoUrl': providerUrl,
+      };
+
+      // ✅ Solo se NON esiste una foto profilo salvata dall’utente
+      if (!hasUserPhoto && providerUrl.isNotEmpty) {
+        patch['photoUrl'] = providerUrl;
+      }
+
+      await ref.set(patch, SetOptions(merge: true));
     }
   }
+
 
   Future<void> ensureActiveLeagueIsValid() async {
     final user = _auth.currentUser;
