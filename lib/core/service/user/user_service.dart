@@ -58,109 +58,108 @@ class UserService {
     if (v is List) {
       return v.map((e) => _s(e)).where((e) => e.isNotEmpty).toList();
     }
+    return <String>[];
+  }
 
+  // ----------------------------------------------------------
+  // Canonicalizzazione chiavi (EN -> IT) per evitare doppioni.
+  // Usata PRIMA di salvare profile, cosi' "birthDate" sparisce
+  // e rimane solo "dataNascita", ecc.
+  // ----------------------------------------------------------
+  static const Map<String, String> _keyAliasToIt = <String, String>{
+    // anagrafica
+    'firstName': 'nome',
+    'lastName': 'cognome',
+    'birthDate': 'dataNascita',
+    'placeOfBirth': 'luogoNascita',
+    'taxCode': 'codiceFiscale',
+    'fiscalCode': 'codiceFiscale',
+    'citizenship': 'cittadinanza',
+    'maritalStatus': 'statoCivile',
 
-    // ----------------------------------------------------------
-    // Canonicalizzazione chiavi (EN -> IT) per evitare doppioni.
-    // Usata PRIMA di salvare profile, cosi' "birthDate" sparisce
-    // e rimane solo "dataNascita", ecc.
-    // ----------------------------------------------------------
-    static const Map<String, String> _keyAliasToIt = <String, String>{
-      // anagrafica
-      'firstName': 'nome',
-      'lastName': 'cognome',
-      'birthDate': 'dataNascita',
-      'placeOfBirth': 'luogoNascita',
-      'taxCode': 'codiceFiscale',
-      'fiscalCode': 'codiceFiscale',
-      'citizenship': 'cittadinanza',
-      'maritalStatus': 'statoCivile',
+    // contatti
+    'phone': 'telefono',
+    'phoneNumber': 'telefono',
 
-      // contatti
-      'phone': 'telefono',
-      'phoneNumber': 'telefono',
+    // pensiero
+    'thought': 'pensiero',
+  };
 
-      // pensiero
-      'thought': 'pensiero',
-    };
+  static String _canonicalFieldKey(String raw) {
+    final k = _s(raw).trim();
+    if (k.isEmpty) return k;
+    if (k.startsWith('custom.')) return k;
+    return _keyAliasToIt[k] ?? k;
+  }
 
-    static String _canonicalFieldKey(String raw) {
-      final k = _s(raw).trim();
-      if (k.isEmpty) return k;
-      if (k.startsWith('custom.')) return k;
-      return _keyAliasToIt[k] ?? k;
+  static Map<String, dynamic> canonicalizeProfileKeys(Map<String, dynamic> inMap) {
+    final out = <String, dynamic>{};
+
+    // 1) normalizza campi flat (livello 1)
+    for (final e in inMap.entries) {
+      final k = _canonicalFieldKey(e.key);
+      if (k.isEmpty) continue;
+      // se arrivano alias EN + IT, preferisci il valore IT gia' presente se non vuoto
+      if (!out.containsKey(k) || out[k] == null || (out[k] is String && (out[k] as String).trim().isEmpty)) {
+        out[k] = e.value;
+      }
     }
 
-    static Map<String, dynamic> canonicalizeProfileKeys(Map<String, dynamic> inMap) {
-      final out = <String, dynamic>{};
-
-      // 1) normalizza campi flat (livello 1)
-      for (final e in inMap.entries) {
+    // 2) normalizza privacy keys
+    final rawPrivacy = _map(out['privacy']);
+    if (rawPrivacy.isNotEmpty) {
+      final nextPrivacy = <String, dynamic>{};
+      for (final e in rawPrivacy.entries) {
         final k = _canonicalFieldKey(e.key);
         if (k.isEmpty) continue;
-        // se arrivano alias EN + IT, preferisci il valore IT gia' presente se non vuoto
-        if (!out.containsKey(k) || out[k] == null || (out[k] is String && (out[k] as String).trim().isEmpty)) {
-          out[k] = e.value;
-        }
+        nextPrivacy[k] = e.value;
       }
-
-      // 2) normalizza privacy keys
-      final rawPrivacy = _map(out['privacy']);
-      if (rawPrivacy.isNotEmpty) {
-        final nextPrivacy = <String, dynamic>{};
-        for (final e in rawPrivacy.entries) {
-          final k = _canonicalFieldKey(e.key);
-          if (k.isEmpty) continue;
-          nextPrivacy[k] = e.value;
-        }
-        out['privacy'] = nextPrivacy;
-      }
-
-      // 3) rimuovi eventuali chiavi alias EN rimaste (sicurezza extra)
-      for (final k in _keyAliasToIt.keys) {
-        out.remove(k);
-      }
-
-      return out;
+      out['privacy'] = nextPrivacy;
     }
 
-    // Lettura robusta dei campi condivisi: se il doc ha "fields" lo usa,
-    // altrimenti fallback su root escludendo le chiavi di metadata.
-    static Map<String, dynamic> _extractFieldsFromSharedDoc(Map<String, dynamic>? data) {
-      final d = data ?? const <String, dynamic>{};
-      final f = d['fields'];
-      if (f is Map) return Map<String, dynamic>.from(f);
-
-      const metaKeys = <String>{
-        'uid',
-        'ownerUid',
-        'viewerUid',
-        'viewerEmailLower',
-        'leagueId',
-        'mode',
-        'displayName',
-        'displayNameLower',
-        'emailLower',
-        'createdAt',
-        'updatedAt',
-        'fields',
-        // access control
-        'allowedUids',
-        'allowedEmailsLower',
-        'allowLeagueMembers',
-        'allowSameComparto',
-        'ownerCompartoLower',
-        'allowSpecial',
-        'allowOwner',
-      };
-
-      final out = <String, dynamic>{};
-      d.forEach((k, v) {
-        if (!metaKeys.contains(k)) out[k] = v;
-      });
-      return out;
+    // 3) rimuovi eventuali chiavi alias EN rimaste (sicurezza extra)
+    for (final k in _keyAliasToIt.keys) {
+      out.remove(k);
     }
-    return <String>[];
+
+    return out;
+  }
+
+  // Lettura robusta dei campi condivisi: se il doc ha "fields" lo usa,
+  // altrimenti fallback su root escludendo le chiavi di metadata.
+  static Map<String, dynamic> _extractFieldsFromSharedDoc(Map<String, dynamic>? data) {
+    final d = data ?? const <String, dynamic>{};
+    final f = d['fields'];
+    if (f is Map) return Map<String, dynamic>.from(f);
+
+    const metaKeys = <String>{
+      'uid',
+      'ownerUid',
+      'viewerUid',
+      'viewerEmailLower',
+      'leagueId',
+      'mode',
+      'displayName',
+      'displayNameLower',
+      'emailLower',
+      'createdAt',
+      'updatedAt',
+      'fields',
+      // access control
+      'allowedUids',
+      'allowedEmailsLower',
+      'allowLeagueMembers',
+      'allowSameComparto',
+      'ownerCompartoLower',
+      'allowSpecial',
+      'allowOwner',
+    };
+
+    final out = <String, dynamic>{};
+    d.forEach((k, v) {
+      if (!metaKeys.contains(k)) out[k] = v;
+    });
+    return out;
   }
 
   /// Profilo completo (PRIVATO) dal doc Users/{uid}
@@ -776,6 +775,7 @@ class UserService {
   static Future<Map<String, dynamic>> fetchVisibleFieldsForViewer({
     required String leagueId,
     required String targetUid,
+    bool includeUsersPublic = true,
   }) async {
     final me = FirebaseAuth.instance.currentUser;
     if (me == null) throw StateError('Not logged');
@@ -795,12 +795,13 @@ class UserService {
     Map<String, dynamic> leagueAllFields = {};
     Map<String, dynamic> leaguePrivFields = {};
     Map<String, dynamic> directFields = {};
-
     // UsersPublic (safe)
-    try {
-      final p = await usersPublicRef(targetUid).get();
-      publicFields = _extractFieldsFromSharedDoc(p.data());
-    } catch (_) {}
+    if (includeUsersPublic) {
+      try {
+        final p = await usersPublicRef(targetUid).get();
+        publicFields = _extractFieldsFromSharedDoc(p.data());
+      } catch (_) {}
+    }
 
     // shared in league (ALL MEMBERS)
     try {

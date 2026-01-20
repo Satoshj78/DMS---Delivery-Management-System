@@ -1,3 +1,6 @@
+// lib/core/service/session/active_league_service.dart
+// Service: inizializzazione utente e gestione activeLeagueId (NO overwrite photoUrl)
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
@@ -24,25 +27,22 @@ class ActiveLeagueService {
     final providerUrl = (user.photoURL ?? '').trim();
 
     final existing = snap.data() ?? {};
-    final existingPhoto = (existing['photoUrl'] ?? '').toString().trim();
-    final hasUserPhoto = existingPhoto.isNotEmpty;
 
     if (!snap.exists) {
-      // Primo ingresso: puoi inizializzare photoUrl col provider (fallback iniziale),
-      // ma resta sempre modificabile dall’upload utente.
+      // Primo ingresso: salva la provider photo SOLO come fallback (providerPhotoUrl).
+      // La foto profilo “ufficiale” resta sempre e solo in photoUrl (caricata dall’utente).
       await ref.set({
         'uid': user.uid,
         'email': email,
         'emailLower': emailLower,
         'displayName': user.displayName ?? '',
         if (providerUrl.isNotEmpty) 'providerPhotoUrl': providerUrl,
-        if (providerUrl.isNotEmpty) 'photoUrl': providerUrl, // fallback solo alla creazione
         'createdAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
         'activeLeagueId': '',
       }, SetOptions(merge: true));
     } else {
-      // ✅ Login successivi: MAI sovrascrivere photoUrl se già c’è una foto utente
+      // ✅ Login successivi: MAI sovrascrivere photoUrl con provider.
       final patch = <String, dynamic>{
         'email': email,
         'emailLower': emailLower,
@@ -52,11 +52,6 @@ class ActiveLeagueService {
         'updatedAt': FieldValue.serverTimestamp(),
         if (providerUrl.isNotEmpty) 'providerPhotoUrl': providerUrl,
       };
-
-      // ✅ Solo se NON esiste una foto profilo salvata dall’utente
-      if (!hasUserPhoto && providerUrl.isNotEmpty) {
-        patch['photoUrl'] = providerUrl;
-      }
 
       await ref.set(patch, SetOptions(merge: true));
     }

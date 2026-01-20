@@ -1,3 +1,6 @@
+// lib/core/service/media/dms_image_upload_service.dart
+// Service: selezione, compressione e upload immagini profilo/cover (Storage + Users)
+
 import 'dart:async';
 import 'dart:typed_data';
 
@@ -322,7 +325,7 @@ class DmsImageUploadService {
   }) async {
     final storage = FirebaseStorage.instance;
 
-    final ref = storage.ref().child('Leagues/$leagueId/users/$uid/$storageFileName');
+    final ref = storage.ref().child('users/$uid/public/$storageFileName');
 
     final task = ref.putData(bytes, SettableMetadata(contentType: 'image/jpeg'));
 
@@ -345,23 +348,25 @@ class DmsImageUploadService {
     required String fieldVMember,
     required String url,
   }) async {
+    // NOTE: per le rules attuali, il client NON scrive mai su Leagues/*/members.
+    // Aggiorniamo solo Users/{uid}. La propagazione verso members/UsersPublic/sharedProfiles
+    // deve essere fatta dalla Cloud Function (onUserProfileWrite).
+
     final db = FirebaseFirestore.instance;
-
     final userRef = db.collection('Users').doc(uid);
-    final memberRef = db.collection('Leagues').doc(leagueId).collection('members').doc(uid);
 
-    final batch = db.batch();
+    final isCover = fieldUrlUserDot.toLowerCase().contains('cover');
+    final urlKey = isCover ? 'coverUrl' : 'photoUrl';
+    final vKey = isCover ? 'coverV' : 'photoV';
 
-    batch.set(userRef, {
-      fieldUrlUserDot: url,
-      fieldVUserDot: FieldValue.increment(1),
+    await userRef.set({
+      urlKey: url,
+      vKey: FieldValue.increment(1),
+      'profile': {
+        urlKey: url,
+        vKey: FieldValue.increment(1),
+      },
+      'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
-
-    batch.set(memberRef, {
-      fieldUrlMember: url,
-      fieldVMember: FieldValue.increment(1),
-    }, SetOptions(merge: true));
-
-    await batch.commit();
   }
 }

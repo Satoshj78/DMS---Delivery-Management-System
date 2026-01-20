@@ -20,6 +20,7 @@ import 'package:dms_app/core/user_fields/hr_field_types.dart';
 import 'package:dms_app/core/user_fields/hr_policy.dart';
 import 'package:dms_app/core/user_fields/hr_policy_dialog.dart';
 import 'package:dms_app/core/user_fields/hr_policy_resolver.dart';
+import 'package:dms_app/core/service/user/user_service.dart';
 import 'package:dms_app/features/users/widgets/user_profile_header_sliver.dart';
 
 
@@ -65,6 +66,10 @@ class _UserDetailPageState extends State<UserDetailPage>
   Map<String, dynamic> _memberValues = {};
   Map<String, dynamic> _viewerMember = {};
 
+  // Campi utente condivisi (visibili al viewer) per target != self
+  Map<String, dynamic> _sharedUserFields = {};
+  bool _sharedLoading = false;
+
   String get _viewerUid => _auth.currentUser?.uid ?? '';
   String get _viewerEmailLower =>
       (_auth.currentUser?.email ?? '').toLowerCase();
@@ -75,11 +80,18 @@ class _UserDetailPageState extends State<UserDetailPage>
   void initState() {
     super.initState();
     _tab = TabController(length: 2, vsync: this);
+
+    _tab.addListener(() {
+      if (!_isSelf && _tab.index == 1 && !_sharedLoading && _sharedUserFields.isEmpty) {
+        _loadSharedUserFields();
+      }
+    });
   }
 
   @override
   void dispose() {
     _tab.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -176,12 +188,34 @@ class _UserDetailPageState extends State<UserDetailPage>
     }
   }
 
+  Future<void> _loadSharedUserFields() async {
+    if (_isSelf || _sharedLoading) return;
+    setState(() => _sharedLoading = true);
+    try {
+      final data = await UserService.fetchVisibleFieldsForViewer(
+        leagueId: widget.leagueId,
+        targetUid: widget.userId,
+        includeUsersPublic: false,
+      );
+      final shared = (data['sharedFields'] is Map)
+          ? Map<String, dynamic>.from(data['sharedFields'] as Map)
+          : <String, dynamic>{};
+
+      if (mounted) {
+        setState(() => _sharedUserFields = shared);
+      }
+    } catch (_) {
+      // ignora: nessun campo condiviso o errore permessi
+    } finally {
+      if (mounted) setState(() => _sharedLoading = false);
+    }
+  }
+
   // ------------------------------------------------------------
   // BUILD
   // ------------------------------------------------------------
   @override
   Widget build(BuildContext context) {
-    final userStream = _userRef(widget.userId).snapshots();
     final memberStream = _memberRef(widget.userId).snapshots();
     final viewerMemberStream = _viewerMemberRef?.snapshots();
 
@@ -193,25 +227,37 @@ class _UserDetailPageState extends State<UserDetailPage>
         }
         final member = memberSnap.data!.data() ?? {};
 
-        return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-          stream: userStream,
-          builder: (context, userSnap) {
-            if (!userSnap.hasData) {
-              return const Center(child: CircularProgressIndicator());
-            }
-            final user = userSnap.data!.data() ?? {};
-
-            if (viewerMemberStream == null) {
-              return _buildPage(context, user: user, member: member);
-            }
-
+        Widget buildWithViewerMember() {
+          // ✅ Users/{uid} è privato: lo leggiamo SOLO se sto guardando me stesso.
+          if (_isSelf) {
+            final userStream = _userRef(widget.userId).snapshots();
             return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-              stream: viewerMemberStream,
-              builder: (context, vSnap) {
-                _viewerMember = vSnap.data?.data() ?? {};
+              stream: userStream,
+              builder: (context, userSnap) {
+                if (!userSnap.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                final user = userSnap.data!.data() ?? {};
                 return _buildPage(context, user: user, member: member);
               },
             );
+          }
+
+          // ✅ Non-self (stessa lega): profilo base da members per risparmiare letture.
+          // I campi extra condivisi vengono caricati SOLO quando apri la tab HR.
+          return _buildPage(context, user: member, member: member);
+        }
+
+        if (viewerMemberStream == null) {
+          _viewerMember = {};
+          return buildWithViewerMember();
+        }
+
+        return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: viewerMemberStream,
+          builder: (context, vSnap) {
+            _viewerMember = vSnap.data?.data() ?? {};
+            return buildWithViewerMember();
           },
         );
       },
@@ -230,7 +276,7 @@ class _UserDetailPageState extends State<UserDetailPage>
     _memberValues = Map<String, dynamic>.from(member);
 
     final viewer = _viewerContext(targetUid: widget.userId);
-    final canEditImages = viewer.isOwnerOrAdmin || viewer.isSelf;
+    final canEditImages = viewer.isSelf;
 
     final displayName = _displayNameFromUser(_userValues);
 
@@ -361,27 +407,27 @@ class _UserDetailPageState extends State<UserDetailPage>
                         child: Stack(
                           children: [
 
-                        Container(
-                          width: avatarSize,
-                          height: avatarSize,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: Colors.grey.shade400,
-                            image: hasPhoto
-                                ? DecorationImage(
-                              image: CachedNetworkImageProvider(effectivePhotoUrl),
-                              fit: BoxFit.cover,
-                            )
-                                : null,
-                            border: Border.all(color: Colors.white, width: 1),
-                          ),
-                          child: !hasPhoto
-                              ? Icon(Icons.person, size: avatarSize * 0.5, color: Colors.white)
-                              : null,
-                        ),
+                            Container(
+                              width: avatarSize,
+                              height: avatarSize,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: Colors.grey.shade400,
+                                image: hasPhoto
+                                    ? DecorationImage(
+                                  image: CachedNetworkImageProvider(effectivePhotoUrl),
+                                  fit: BoxFit.cover,
+                                )
+                                    : null,
+                                border: Border.all(color: Colors.white, width: 1),
+                              ),
+                              child: !hasPhoto
+                                  ? Icon(Icons.person, size: avatarSize * 0.5, color: Colors.white)
+                                  : null,
+                            ),
 
 
-                          if (canEditImages && t < 0.4)
+                            if (canEditImages && t < 0.4)
                               Positioned(
                                 right: 0,
                                 bottom: 0,
@@ -562,7 +608,7 @@ class _UserDetailPageState extends State<UserDetailPage>
   // TAB PROFILO
   // ------------------------------------------------------------
   Widget _buildProfileTab(HrViewerContext viewer) {
-    final thought = (_userValues['thought'] ?? '').toString();
+    final thought = (_userValues['pensiero'] ?? _userValues['thought'] ?? '').toString();
 
     return ListView(
       padding: const EdgeInsets.all(12),
@@ -577,7 +623,7 @@ class _UserDetailPageState extends State<UserDetailPage>
             const Spacer(),
             IconButton(
               icon: Icon(_editMode ? Icons.check : Icons.edit),
-              onPressed: () => setState(() => _editMode = !_editMode),
+              onPressed: viewer.isSelf ? () => setState(() => _editMode = !_editMode) : null,
             ),
           ],
         ),
@@ -610,9 +656,49 @@ class _UserDetailPageState extends State<UserDetailPage>
     final categories =
     HrFieldCatalog.fields.map((f) => f.category).toSet().toList();
 
+    // Lazy-load dei campi condivisi SOLO se non sto guardando me stesso
+    if (!viewer.isSelf && _sharedUserFields.isEmpty && !_sharedLoading) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_sharedLoading && _sharedUserFields.isEmpty) {
+          _loadSharedUserFields();
+        }
+      });
+    }
+
     return ListView(
       padding: const EdgeInsets.all(12),
       children: [
+        if (!viewer.isSelf)
+          Container(
+            margin: const EdgeInsets.only(bottom: 12),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.black12),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Campi condivisi',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  _sharedLoading
+                      ? 'Caricamento in corso…'
+                      : (_sharedUserFields.isEmpty
+                      ? 'Nessun campo condiviso o non hai permessi.'
+                      : 'Caricati: ${_sharedUserFields.length}'),
+                ),
+                if (_sharedLoading)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 8),
+                    child: LinearProgressIndicator(),
+                  ),
+              ],
+            ),
+          ),
         for (final cat in categories) ...[
           Text(cat,
               style:
@@ -631,6 +717,22 @@ class _UserDetailPageState extends State<UserDetailPage>
 
     return fields.map((field) {
       final isUserTarget = field.target == HrTarget.user;
+
+      // 🔒 Non-self: per i campi USER mostro SOLO quelli effettivamente condivisi
+      if (!viewer.isSelf && isUserTarget) {
+        if (!_sharedUserFields.containsKey(field.key)) {
+          return const SizedBox.shrink();
+        }
+        final value = _sharedUserFields[field.key];
+        return HrFieldRenderer(
+          field: field,
+          value: value,
+          editable: false,
+          onChanged: (_, __) {},
+        );
+      }
+
+      // Self (o campi MEMBER): usa policy + permessi
       final policy = _getPolicy(
         isUserTarget: isUserTarget,
         fieldKey: field.key,
@@ -644,8 +746,7 @@ class _UserDetailPageState extends State<UserDetailPage>
       final canEdit =
           _editMode && HrPolicyResolver.canEdit(policy: policy, viewer: viewer);
 
-      final value =
-      isUserTarget ? _userValues[field.key] : _memberValues[field.key];
+      final value = isUserTarget ? _userValues[field.key] : _memberValues[field.key];
 
       final row = HrFieldRenderer(
         field: field,
@@ -663,9 +764,8 @@ class _UserDetailPageState extends State<UserDetailPage>
         },
       );
 
-      final canManagePolicy =
-          viewer.isOwnerOrAdmin || (viewer.isSelf && !field.sensitive);
-
+      // Policy gestione SOLO per self (client-side).
+      final canManagePolicy = viewer.isSelf;
       if (!canManagePolicy) return row;
 
       return Stack(
@@ -709,9 +809,20 @@ class _UserDetailPageState extends State<UserDetailPage>
   }
 
   Future<void> _persistField(bool isUserTarget, String key, dynamic value) async {
-    final ref =
-    isUserTarget ? _userRef(widget.userId) : _memberRef(widget.userId);
-    await ref.set({key: value}, SetOptions(merge: true));
+    if (!isUserTarget) {
+      // 🔒 Con le rules attuali il client NON scrive su Leagues/{leagueId}/members.
+      // I campi di lega vanno gestiti da Cloud Function / callable.
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Campo di lega: modifica gestita dal backend.'),
+          ),
+        );
+      }
+      return;
+    }
+
+    await _userRef(widget.userId).set({key: value}, SetOptions(merge: true));
   }
 
   // ------------------------------------------------------------
@@ -765,15 +876,27 @@ class _UserDetailPageState extends State<UserDetailPage>
       final jpeg = await compute(_compressToJpeg, bytes);
 
       final uid = widget.userId;
-      final path = isCover ? 'users/$uid/cover.jpg' : 'users/$uid/photo.jpg';
+      final storageFile = isCover ? 'cover.jpg' : 'profile.jpg';
+      final path = 'users/$uid/public/$storageFile';
 
       final ref = FirebaseStorage.instance.ref(path);
       await ref.putData(jpeg, SettableMetadata(contentType: 'image/jpeg'));
       final url = await ref.getDownloadURL();
 
       final field = isCover ? 'coverUrl' : 'photoUrl';
-      await _userRef(uid).set({field: url}, SetOptions(merge: true));
-      await _memberRef(uid).set({field: url}, SetOptions(merge: true));
+      final vField = isCover ? 'coverV' : 'photoV';
+
+      // NOTE: il client aggiorna SOLO Users/{uid}. La propagazione verso members/UsersPublic/sharedProfiles
+      // avviene tramite Cloud Function.
+      await _userRef(uid).set({
+        field: url,
+        vField: FieldValue.increment(1),
+        'profile': {
+          field: url,
+          vField: FieldValue.increment(1),
+        },
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
 
       setState(() => _userValues[field] = url);
     } finally {
