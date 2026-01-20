@@ -11,6 +11,86 @@ const bucket = admin.storage().bucket();
 // ✅ Regione principale
 const REGION = "europe-west1";
 
+// =====================================================
+// ✅ Nickname registry (global uniqueness)
+// - Nicknames/{nicknameLower} -> { uid, nickname, updatedAt }
+// - Clients MUST use callable setNickname()
+// =====================================================
+function normalizeNickname(input: any): { nickname: string; lower: string } {
+  const raw = (input ?? "").toString().trim();
+  // basic validation: 3-20 chars, letters/numbers/._-
+  const nickname = raw;
+  const lower = raw.toLowerCase();
+  if (nickname.length < 3 || nickname.length > 20) {
+    throw new HttpsError("invalid-argument", "Nickname deve essere lungo 3-20 caratteri.");
+  }
+  if (!/^[a-zA-Z0-9._-]+$/.test(nickname)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Nickname non valido. Usa solo lettere, numeri, punto, underscore, trattino."
+    );
+  }
+  return { nickname, lower };
+}
+
+async function setNicknameTxn(userId: string, nickname: string, lower: string) {
+  const nickRef = db.collection("Nicknames").doc(lower);
+  const userRef = db.collection("Users").doc(userId);
+
+  await db.runTransaction(async (tx) => {
+    const [nickSnap, userSnap] = await Promise.all([tx.get(nickRef), tx.get(userRef)]);
+
+    if (!userSnap.exists) {
+      throw new HttpsError("failed-precondition", "Profilo utente non trovato.");
+    }
+
+    if (nickSnap.exists) {
+      const ownerUid = (nickSnap.data()?.uid ?? "") as string;
+      if (ownerUid && ownerUid !== userId) {
+        throw new HttpsError("already-exists", "Nickname già in uso.");
+      }
+    }
+
+    const oldLower = ((userSnap.data()?.nicknameLower ?? "") as string).toLowerCase();
+    if (oldLower && oldLower !== lower) {
+      const oldRef = db.collection("Nicknames").doc(oldLower);
+      const oldSnap = await tx.get(oldRef);
+      if (oldSnap.exists && (oldSnap.data()?.uid ?? "") === userId) {
+        tx.delete(oldRef);
+      }
+    }
+
+    tx.set(
+      nickRef,
+      {
+        uid: userId,
+        nickname,
+        nicknameLower: lower,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    tx.set(
+      userRef,
+      {
+        nickname,
+        nicknameLower: lower,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  });
+}
+
+export const setNickname = onCall({ region: REGION }, async (req) => {
+  const userId = requireAuth(req);
+  const { nickname, lower } = normalizeNickname(req.data?.nickname);
+
+  await setNicknameTxn(userId, nickname, lower);
+  return { ok: true, nickname, nicknameLower: lower };
+});
+
 /**
  * ✅ Campi SEMPRE pubblici (enforced server-side)
  * NB: questi campi vengono propagati in UsersPublic + members anche se la privacy map dice altro.

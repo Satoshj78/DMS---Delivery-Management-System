@@ -99,10 +99,16 @@ service cloud.firestore {
   allow read: if signedIn() && uid() == userId;
 
   // create: ok (di solito activeLeagueId sarà "" all’inizio)
-  allow create: if signedIn() && uid() == userId;
+  // 🔒 nickname deve essere assegnato SOLO via callable setNickname (registro globale)
+  allow create: if signedIn() && uid() == userId
+    && (request.resource.data.nickname == null || request.resource.data.nickname == "")
+    && (request.resource.data.nicknameLower == null || request.resource.data.nicknameLower == "");
 
-  // update: vincola solo activeLeagueId, il resto rimane libero
-  allow update: if signedIn() && uid() == userId && validActiveLeagueChange();
+  // update: vincola activeLeagueId; nickname non modificabile dal client
+  allow update: if signedIn() && uid() == userId
+    && validActiveLeagueChange()
+    && request.resource.data.nickname == resource.data.nickname
+    && request.resource.data.nicknameLower == resource.data.nicknameLower;
 
   allow delete: if signedIn() && uid() == userId;
 
@@ -133,6 +139,16 @@ match /sharedToLeagues/{leagueId} {
     // ✅ USERSPUBLIC — scrive solo la Function
     // =====================================================
     match /UsersPublic/{userId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    // =====================================================
+    // ✅ NICKNAMES — registro globale (univocità)
+    // Scrive solo la Function (callable setNickname)
+    // =====================================================
+    match /Nicknames/{nicknameLower} {
+      // opzionale: permetti la lettura per check disponibilità
       allow read: if signedIn();
       allow write: if false;
     }

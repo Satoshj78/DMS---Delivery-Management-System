@@ -7,6 +7,7 @@ import 'dart:ui';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
@@ -818,6 +819,36 @@ class _UserDetailPageState extends State<UserDetailPage>
             content: Text('Campo di lega: modifica gestita dal backend.'),
           ),
         );
+      }
+      return;
+    }
+
+    // ✅ Nickname unico globale: passa SEMPRE dalla callable.
+    final k = key.trim();
+    if (k == 'nickName' || k == 'nickname' || k == 'NickName') {
+      final nextNick = (value ?? '').toString().trim();
+      if (nextNick.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Il nickname non può essere vuoto.')),
+          );
+        }
+        return;
+      }
+      try {
+        final callable = FirebaseFunctions.instance.httpsCallable('setNickname');
+        await callable.call(<String, dynamic>{'nickname': nextNick});
+        setState(() {
+          _userValues['nickName'] = nextNick;
+          _userValues['nickname'] = nextNick;
+          _userValues['NickName'] = nextNick;
+        });
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Nickname non valido o già usato: $e')),
+          );
+        }
       }
       return;
     }

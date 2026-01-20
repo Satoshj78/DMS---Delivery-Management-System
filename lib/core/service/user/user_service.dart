@@ -2,6 +2,7 @@
 // UserService: gestione profilo utente, privacy e sincronizzazione (Users + Leagues/*)
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/cupertino.dart';
 
@@ -61,6 +62,24 @@ class UserService {
     return <String>[];
   }
 
+  static String _extractNickFromMap(Map<String, dynamic> m) {
+    return _s(m['nickName'] ?? m['nickname'] ?? m['NickName']);
+  }
+
+  static Future<void> _setNicknameIfNeeded({
+    required String uid,
+    required String? nextNick,
+    required String? prevNick,
+  }) async {
+    final n = _s(nextNick).trim();
+    final p = _s(prevNick).trim();
+    if (n.isEmpty) return; // nickname vuoto => non tocchiamo
+    if (n == p) return;
+    // Nickname unico globale: deve passare dalla callable (transazione)
+    final callable = FirebaseFunctions.instance.httpsCallable('setNickname');
+    await callable.call(<String, dynamic>{'nickname': n});
+  }
+
   // ----------------------------------------------------------
   // Canonicalizzazione chiavi (EN -> IT) per evitare doppioni.
   // Usata PRIMA di salvare profile, cosi' "birthDate" sparisce
@@ -83,6 +102,11 @@ class UserService {
 
     // pensiero
     'thought': 'pensiero',
+
+    // nickname
+    'nickname': 'nickName',
+    'NickName': 'nickName',
+    'nickName': 'nickName',
   };
 
   static String _canonicalFieldKey(String raw) {
@@ -596,6 +620,16 @@ class UserService {
     // ✅ canonicalizza chiavi (EN->IT) e rimuove alias EN
     final nextProfile = canonicalizeProfileKeys(mergedProfile);
     nextProfile['privacy'] = normalizePrivacy(_map(nextProfile['privacy']));
+
+    // ✅ NickName e' unico globale: se cambia, deve passare dalla callable.
+    // Per evitare permission-denied (rules bloccano update diretto), lo rimuoviamo dal payload
+    // e lasciamo che sia la callable ad aggiornare Users/{uid}.
+    final prevNick = _extractNickFromMap(prevProfile.isNotEmpty ? prevProfile : data);
+    final nextNick = _extractNickFromMap(nextProfile);
+    await _setNicknameIfNeeded(uid: uid, nextNick: nextNick, prevNick: prevNick);
+    nextProfile.remove('nickName');
+    nextProfile.remove('nickname');
+    nextProfile.remove('NickName');
 
     final publicProfile = buildPublicProfile(nextProfile);
 
