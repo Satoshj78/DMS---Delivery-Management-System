@@ -30,12 +30,15 @@ class _HrPolicyDialogState extends State<HrPolicyDialog> {
   late HrVisibilityScope _vis;
   late HrEditScope _editScope;
 
+  final List<String> _areas = [];
+
   final List<String> _branches = [];
   final List<String> _roles = [];
   final List<String> _comparti = [];
   final List<String> _uids = [];
   final List<String> _emails = [];
 
+  final List<String> _editAreas = [];
   final List<String> _editBranches = [];
   final List<String> _editRoles = [];
   final List<String> _editComparti = [];
@@ -52,12 +55,16 @@ class _HrPolicyDialogState extends State<HrPolicyDialog> {
     _vis = p.visibility;
     _editScope = p.editScope;
 
+    _areas.addAll(p.areas);
+    _areas.addAll(p.areas);
     _branches.addAll(p.branches);
     _roles.addAll(p.roles);
     _comparti.addAll(p.comparti);
     _uids.addAll(p.uids);
     _emails.addAll(p.emailsLower);
 
+    _editAreas.addAll(p.editAreas);
+    _editAreas.addAll(p.editAreas);
     _editBranches.addAll(p.editBranches);
     _editRoles.addAll(p.editRoles);
     _editComparti.addAll(p.editCompartI);
@@ -140,6 +147,15 @@ class _HrPolicyDialogState extends State<HrPolicyDialog> {
 
               if (_vis == HrVisibilityScope.restricted) ...[
                 const Divider(),
+                const Text('Ambito aree', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 6),
+                _AreasPicker(
+                  leagueId: widget.leagueId,
+                  selected: _areas,
+                  enabled: _canEditPolicyFully,
+                  onChanged: () => setState(() {}),
+                ),
+                const SizedBox(height: 10),
                 const Text('Ambito filiali', style: TextStyle(fontWeight: FontWeight.bold)),
                 const SizedBox(height: 6),
                 _BranchesPicker(
@@ -245,6 +261,15 @@ class _HrPolicyDialogState extends State<HrPolicyDialog> {
                 ),
                 if (_editScope == HrEditScope.restricted) ...[
                   const SizedBox(height: 10),
+                  const Text('Aree per edit (vuoto = eredita aree visibilita)', style: TextStyle(fontWeight: FontWeight.bold)),
+                  _AreasPicker(
+                    leagueId: widget.leagueId,
+                    selected: _editAreas,
+                    enabled: _canEditPolicyFully,
+                    onChanged: () => setState(() {}),
+                  ),
+                  const SizedBox(height: 10),
+
                   const Text('Filiali per edit (vuoto = eredita filiali visibilità)', style: TextStyle(fontWeight: FontWeight.bold)),
                   _BranchesPicker(
                     leagueId: widget.leagueId,
@@ -418,6 +443,70 @@ class _HrPolicyDialogState extends State<HrPolicyDialog> {
       },
       icon: const Icon(Icons.person_add),
       label: Text(title),
+    );
+  }
+}
+
+class _AreasPicker extends StatefulWidget {
+  final String leagueId;
+  final List<String> selected;
+  final bool enabled;
+  final VoidCallback onChanged;
+  const _AreasPicker({
+    required this.leagueId,
+    required this.selected,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  @override
+  State<_AreasPicker> createState() => _AreasPickerState();
+}
+
+class _AreasPickerState extends State<_AreasPicker> {
+  @override
+  Widget build(BuildContext context) {
+    final ref = FirebaseFirestore.instance
+        .collection('Leagues')
+        .doc(widget.leagueId)
+        .collection('areas');
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: ref.snapshots(),
+      builder: (context, snap) {
+        if (!snap.hasData) return const SizedBox(height: 38, child: Center(child: CircularProgressIndicator()));
+        final docs = snap.data!.docs;
+        if (docs.isEmpty) {
+          return const Text('Nessuna area definita. (Owner: crea areas in Leagues/{leagueId}/areas)');
+        }
+
+        return Wrap(
+          spacing: 8,
+          runSpacing: 6,
+          children: docs.map((d) {
+            final data = d.data();
+            final id = d.id;
+            final label = (data['name'] ?? id).toString();
+            final isSel = widget.selected.contains(id);
+            return FilterChip(
+              label: Text(label),
+              selected: isSel,
+              onSelected: !widget.enabled
+                  ? null
+                  : (v) {
+                setState(() {
+                  if (v) {
+                    if (!widget.selected.contains(id)) widget.selected.add(id);
+                  } else {
+                    widget.selected.remove(id);
+                  }
+                });
+                widget.onChanged();
+              },
+            );
+          }).toList(),
+        );
+      },
     );
   }
 }

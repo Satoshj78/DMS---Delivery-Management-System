@@ -1,5 +1,5 @@
 // lib/core/user_fields/hr_policy.dart
-// Policy per campo HR: visibilità e modificabilità (multi-filiale, ruoli, comparti, uids, emails)
+// Policy per campo HR: visibilita' e modificabilita' (multi-area, multi-filiale, ruoli, comparti, uids, emails)
 
 enum HrVisibilityScope {
   selfOnly,
@@ -11,16 +11,19 @@ enum HrVisibilityScope {
 enum HrEditScope {
   none,
   self,
-  restricted, // ruoli/comparti/uids/emails (+ owner/admin sempre)
+  restricted, // ruoli/comparti/aree/filiali/uids/emails (+ owner/admin sempre)
 }
 
 class HrFieldPolicy {
   final HrVisibilityScope visibility;
 
+  /// Se vuoto/null -> tutte le aree.
+  final List<String> areas;
+
   /// Se vuoto/null -> tutte le filiali. Se presente -> almeno una deve matchare.
   final List<String> branches;
 
-  /// Chi può vedere (solo se visibility == restricted)
+  /// Chi puo' vedere (solo se visibility == restricted)
   final List<String> roles;
   final List<String> comparti;
   final List<String> uids;
@@ -28,6 +31,7 @@ class HrFieldPolicy {
 
   /// Modifica
   final HrEditScope editScope;
+  final List<String> editAreas;
   final List<String> editRoles;
   final List<String> editCompartI;
   final List<String> editUids;
@@ -36,12 +40,14 @@ class HrFieldPolicy {
 
   const HrFieldPolicy({
     required this.visibility,
+    this.areas = const [],
     this.branches = const [],
     this.roles = const [],
     this.comparti = const [],
     this.uids = const [],
     this.emailsLower = const [],
     this.editScope = HrEditScope.none,
+    this.editAreas = const [],
     this.editRoles = const [],
     this.editCompartI = const [],
     this.editUids = const [],
@@ -67,12 +73,14 @@ class HrFieldPolicy {
 
   Map<String, dynamic> toMap() => {
     'visibility': visibility.name,
+    'areas': areas,
     'branches': branches,
     'roles': roles,
     'comparti': comparti,
     'uids': uids,
     'emailsLower': emailsLower,
     'editScope': editScope.name,
+    'editAreas': editAreas,
     'editRoles': editRoles,
     'editCompartI': editCompartI,
     'editUids': editUids,
@@ -100,12 +108,14 @@ class HrFieldPolicy {
 
     return HrFieldPolicy(
       visibility: vis,
+      areas: ls(raw['areas']),
       branches: ls(raw['branches']),
       roles: ls(raw['roles']),
       comparti: ls(raw['comparti']),
       uids: ls(raw['uids']),
       emailsLower: ls(raw['emailsLower']),
       editScope: edit,
+      editAreas: ls(raw['editAreas']),
       editRoles: ls(raw['editRoles']),
       editCompartI: ls(raw['editCompartI']),
       editUids: ls(raw['editUids']),
