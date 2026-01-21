@@ -66,15 +66,6 @@ final List<UserFieldDefinition> userFieldDefinitions = [
   // ANAGRAFICA
   // ----------------------------
   UserFieldDefinition(
-    key: 'firstName',
-    label: 'Nome',
-    type: UserFieldType.text,
-    category: 'Anagrafica',
-    defaultVisibility: UserFieldVisibility.public,
-    required: true,
-    order: 1,
-  ),
-  UserFieldDefinition(
     key: 'lastName',
     label: 'Cognome',
     type: UserFieldType.text,
@@ -82,6 +73,15 @@ final List<UserFieldDefinition> userFieldDefinitions = [
     defaultVisibility: UserFieldVisibility.public,
     required: true,
     order: 2,
+  ),
+  UserFieldDefinition(
+    key: 'firstName',
+    label: 'Nome',
+    type: UserFieldType.text,
+    category: 'Anagrafica',
+    defaultVisibility: UserFieldVisibility.public,
+    required: true,
+    order: 1,
   ),
   UserFieldDefinition(
     key: 'nickname',

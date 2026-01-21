@@ -599,8 +599,8 @@ class _UserDetailPageState extends State<UserDetailPage>
 
 
   String _displayNameFromUser(Map<String, dynamic> u) {
-    final fn = (u['firstName'] ?? u['nome'] ?? '').toString().trim();
     final ln = (u['lastName'] ?? u['cognome'] ?? '').toString().trim();
+    final fn = (u['firstName'] ?? u['nome'] ?? '').toString().trim();
     final name = ('$fn $ln').trim();
     return name.isEmpty ? 'Utente' : name;
   }
