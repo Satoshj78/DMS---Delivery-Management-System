@@ -319,14 +319,24 @@ class _LeagueAccessPageState extends State<LeagueAccessPage> with TickerProvider
 
     setState(() => _isLoading = true);
     try {
-      final uSnap = await _db.collection('Users').doc(user.uid).get();
-      final uData = uSnap.data() ?? {};
-      final profile = UserService.buildProfileFromUserDoc(uData);
-      profile['nome'] = nomeCreatore;
-      profile['cognome'] = cognomeCreatore;
-      await UserService.updateMyGlobalProfileAndSync(profile: profile);
+      // ✅ NON bloccare la creazione lega se il sync profilo fallisce
+      try {
+        final uSnap = await _db.collection('Users').doc(user.uid).get();
+        final uData = uSnap.data() ?? {};
+        final profile = UserService.buildProfileFromUserDoc(uData);
+        profile['nome'] = nomeCreatore;
+        profile['cognome'] = cognomeCreatore;
+        await UserService.updateMyGlobalProfileAndSync(profile: profile);
+      } catch (e) {
+        debugPrint('Sync profilo fallito (continuo): $e');
+      }
 
-      final res = await _api.createLeague(nome: nomeLega, logoBytes: _logoBytes);
+      final res = await _api.createLeague(
+        nome: nomeLega,
+        creatorNome: nomeCreatore,
+        creatorCognome: cognomeCreatore,
+        logoBytes: _logoBytes,
+      );
 
       final leagueId = (res['leagueId'] ?? '').toString().trim();
       if (leagueId.isNotEmpty) {
@@ -340,6 +350,7 @@ class _LeagueAccessPageState extends State<LeagueAccessPage> with TickerProvider
       if (mounted) setState(() => _isLoading = false);
     }
   }
+
 
   // ---------------- UI HELPERS ----------------
   Widget _fastExpandableCard({

@@ -838,12 +838,30 @@ async function callerIsManager(leagueId: string, uid: string, permKey: string): 
 // ------------------------
 export const createLeague = onCall({ region: REGION }, async (req) => {
   const uid = requireAuth(req);
+
   const nome = (req.data?.nome ?? "").toString().trim();
   if (!nome) throw new HttpsError("invalid-argument", "Nome mancante.");
 
-  const ensured = await ensureUserDoc(uid);
-  const pub = await getLeaguePublicProfile(uid, ensured);
+  // ✅ nuovi campi richiesti al creatore
+  const creatorNome = (req.data?.creatorNome ?? "").toString().trim();
+  const creatorCognome = (req.data?.creatorCognome ?? "").toString().trim();
+  if (!creatorNome || !creatorCognome) {
+    throw new HttpsError("invalid-argument", "Inserisci Nome e Cognome del creatore.");
+  }
 
+  const ensured = await ensureUserDoc(uid);
+
+  // ✅ prendo eventuali photo/cover/nickname già presenti
+  const userSnap = await db.collection("Users").doc(uid).get();
+  const u0 = (userSnap.data() ?? {}) as Record<string, any>;
+
+  // ✅ costruisco pub usando i valori inseriti (Cognome Nome)
+  const pub = resolvePublicFromUserDoc(
+    { ...u0, nome: creatorNome, cognome: creatorCognome },
+    ensured
+  );
+
+  // joinCode unico
   let joinCode = randomJoinCode(6);
   for (let i = 0; i < 10; i++) {
     const q = await db.collection("Leagues").where("joinCode", "==", joinCode).limit(1).get();
@@ -854,6 +872,7 @@ export const createLeague = onCall({ region: REGION }, async (req) => {
   const leagueRef = db.collection("Leagues").doc();
   const leagueId = leagueRef.id;
 
+  // logo
   let logoUrl = "";
   const logoBase64 = (req.data?.logoBase64 ?? "").toString().trim();
   const logoContentType = (req.data?.logoContentType ?? "image/jpeg").toString();
@@ -895,6 +914,7 @@ export const createLeague = onCall({ region: REGION }, async (req) => {
       { merge: true }
     );
 
+    // ✅ member creato dalla function (no bootstrap dal client)
     const memberRef = leagueRef.collection("members").doc(uid);
     tx.set(
       memberRef,
@@ -909,9 +929,12 @@ export const createLeague = onCall({ region: REGION }, async (req) => {
       { merge: true }
     );
 
+    // ✅ aggiorno Users (server-side): nome/cognome + activeLeagueId
     tx.set(
       db.collection("Users").doc(uid),
       {
+        nome: creatorNome,
+        cognome: creatorCognome,
         activeLeagueId: leagueId,
         leagueIds: admin.firestore.FieldValue.arrayUnion(leagueId),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -922,6 +945,7 @@ export const createLeague = onCall({ region: REGION }, async (req) => {
 
   return { ok: true, leagueId, joinCode, logoUrl };
 });
+
 
 // ------------------------
 // LIST LEAGUES FOR USER

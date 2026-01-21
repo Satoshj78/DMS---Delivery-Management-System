@@ -582,10 +582,12 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
       return;
     }
 
-    final nomeCreatore = _creatorNomeCtrl.text.trim();
+    // ✅ ordine: Cognome + Nome (come vuoi tu)
     final cognomeCreatore = _creatorCognomeCtrl.text.trim();
-    if (nomeCreatore.isEmpty || cognomeCreatore.isEmpty) {
-      _toast('Inserisci Nome e Cognome del creatore.');
+    final nomeCreatore = _creatorNomeCtrl.text.trim();
+
+    if (cognomeCreatore.isEmpty || nomeCreatore.isEmpty) {
+      _toast('Inserisci Cognome e Nome del creatore.');
       return;
     }
 
@@ -597,20 +599,12 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
 
     setState(() => _creating = true);
     try {
-      // 1) aggiorno profilo globale (self) con nome/cognome
-      final uSnap = await _db.collection('Users').doc(user.uid).get();
-      final uData = uSnap.data() ?? {};
-
-      final profile = UserService.buildProfileFromUserDoc(uData);
-      profile['nome'] = nomeCreatore;
-      profile['cognome'] = cognomeCreatore;
-
-      await UserService.updateMyGlobalProfileAndSync(profile: profile);
-
-      // 2) creo la lega via callable
+      // ✅ 1) creo la lega via callable (la function crea members + aggiorna Users)
       final res = await _api.createLeague(
         nome: nomeLega,
         logoBytes: _logoBytes,
+        creatorNome: nomeCreatore,
+        creatorCognome: cognomeCreatore,
       );
 
       final leagueId = (res['leagueId'] ?? '').toString().trim();
@@ -619,15 +613,10 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
         return;
       }
 
-      // ✅ 3) BOOTSTRAP del member doc owner: così UsersPage “lunga” ti vede subito
-      await _bootstrapMyMemberDocAfterCreate(
-        leagueId: leagueId,
-        user: user,
-        nome: nomeCreatore,
-        cognome: cognomeCreatore,
-      );
+      // ❌ NO bootstrap member dal client (lo fa già la function)
+      // await _bootstrapMyMemberDocAfterCreate(...);
 
-      // 4) apro lega
+      // ✅ 2) apro lega (callable setActiveLeague) — opzionale ma ok
       await _openLeague(leagueId);
 
       _toast('Lega creata!');
@@ -645,6 +634,7 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
       if (mounted) setState(() => _creating = false);
     }
   }
+
 
 
 
@@ -910,16 +900,6 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
           const SizedBox(height: 10),
           Row(
             children: [
-              Expanded(
-                child: TextField(
-                  controller: _creatorNomeCtrl,
-                  focusNode: _fnNome,
-                  textCapitalization: TextCapitalization.words,
-                  textInputAction: TextInputAction.next,
-                  onSubmitted: (_) => FocusScope.of(context).requestFocus(_fnCognome),
-                  decoration: const InputDecoration(labelText: 'Nome', border: OutlineInputBorder()),
-                ),
-              ),
               const SizedBox(width: 10),
               Expanded(
                 child: TextField(
@@ -929,6 +909,16 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
                   textInputAction: TextInputAction.next,
                   onSubmitted: (_) => FocusScope.of(context).requestFocus(_fnNomeLega),
                   decoration: const InputDecoration(labelText: 'Cognome', border: OutlineInputBorder()),
+                ),
+              ),
+              Expanded(
+                child: TextField(
+                  controller: _creatorNomeCtrl,
+                  focusNode: _fnNome,
+                  textCapitalization: TextCapitalization.words,
+                  textInputAction: TextInputAction.next,
+                  onSubmitted: (_) => FocusScope.of(context).requestFocus(_fnCognome),
+                  decoration: const InputDecoration(labelText: 'Nome', border: OutlineInputBorder()),
                 ),
               ),
             ],

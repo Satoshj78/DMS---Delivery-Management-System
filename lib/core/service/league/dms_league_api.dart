@@ -81,13 +81,20 @@ class DmsLeagueApi {
 
   Future<Map<String, dynamic>> createLeague({
     required String nome,
+    required String creatorNome,
+    required String creatorCognome,
     Uint8List? logoBytes,
   }) {
     return _call('createLeague', {
       'nome': nome,
+      'creatorNome': creatorNome,
+      'creatorCognome': creatorCognome,
       if (logoBytes != null) 'logoBase64': base64Encode(logoBytes),
+      // opzionale: la tua function ha già default "image/jpeg"
+      if (logoBytes != null) 'logoContentType': 'image/jpeg',
     });
   }
+
 
   // ----------- HELPERS (Firestore) -----------
   Future<void> setActiveLeague({required String leagueId}) async {

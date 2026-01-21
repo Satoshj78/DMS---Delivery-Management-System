@@ -28,15 +28,17 @@ class LeagueService {
   /// Ritorna (leagueId, joinCode) come prima
   static Future<({String leagueId, String joinCode})> createLeague({
     required String leagueName,
+    required String creatorNome,
+    required String creatorCognome,
     Uint8List? logoBytes,
   }) async {
     final u = FirebaseAuth.instance.currentUser;
     if (u == null) throw StateError('Not logged');
 
-    final userRef = await _ensureUserDoc();
-
     final res = await _api.createLeague(
       nome: leagueName.trim(),
+      creatorNome: creatorNome.trim(),
+      creatorCognome: creatorCognome.trim(),
       logoBytes: logoBytes,
     );
 
@@ -47,16 +49,10 @@ class LeagueService {
       throw StateError('createLeague: leagueId mancante nella risposta function');
     }
 
-
-    // la function di solito lo fa già, ma è ok ribadirlo lato client su Users/{uid}
-    await userRef.set({
-      'activeLeagueId': leagueId,
-      'leagueIds': FieldValue.arrayUnion([leagueId]),
-      'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
-
+    // ✅ NON riscrivere Users/{uid} qui: lo fa già la function createLeague (server-side)
     return (leagueId: leagueId, joinCode: joinCode);
   }
+
 
   /// ✅ MODALITÀ 2: NON entra subito, invia richiesta
   /// ritorna la response della function (es: alreadyMember, alreadyRequested, leagueId, ...)
