@@ -900,7 +900,6 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
           const SizedBox(height: 10),
           Row(
             children: [
-              const SizedBox(width: 10),
               Expanded(
                 child: TextField(
                   controller: _creatorCognomeCtrl,
@@ -911,6 +910,7 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
                   decoration: const InputDecoration(labelText: 'Cognome', border: OutlineInputBorder()),
                 ),
               ),
+              const SizedBox(width: 10),
               Expanded(
                 child: TextField(
                   controller: _creatorNomeCtrl,
