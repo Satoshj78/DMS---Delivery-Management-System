@@ -349,432 +349,123 @@ function memberPublicFields(pub: {
 export const onUserProfileWrite = onDocumentWritten(
   { region: REGION, document: "Users/{uid}" },
   async (event) => {
-    const uid = ((event.params as any)?.uid ?? "").toString().trim();
-    if (!uid) return;
-
+    const uid = event.params.uid;
     const afterSnap = event.data?.after;
 
-    // 🧹 Eliminazione utente → pulizia UsersPublic (e volendo anche sharedProfiles…)
+    // 🧹 Utente eliminato
     if (!afterSnap?.exists) {
-      console.log(`🧹 Utente ${uid} eliminato → pulizia UsersPublic`);
       await db.collection("UsersPublic").doc(uid).delete().catch(() => {});
       return;
     }
 
-    const afterData = (afterSnap.data() ?? {}) as Record<string, any>;
+    const afterData = afterSnap.data() ?? {};
+    const profile = afterData.profile ?? {};
 
-    // -----------------------------
-    // ✅ PROFILO FLAT: Users/{uid}.profile.<campo>
-    // -----------------------------
-    const profile = ((afterData.profile ?? {}) as Record<string, any>) || {};
-    const profilePrivacy =
-      ((profile.privacy ?? {}) as Record<string, any>) ||
-      ((afterData._fieldSharing ?? {}) as Record<string, any>) ||
-      ((afterData.fieldSharing ?? {}) as Record<string, any>) ||
-      {};
-    const allLeaguesScope = (afterData.allLeaguesScope ?? {}) as Record<string, any>;
+    const custom: Record<string, any> =
+      typeof profile.custom === "object" && !Array.isArray(profile.custom)
+        ? { ...profile.custom }
+        : {};
 
-    console.log(`🚀 onUserProfileWrite(${uid}) — sync profilo (flat) + privacy...`);
+    const privacy: Record<string, any> =
+      typeof profile.privacy === "object" ? profile.privacy : {};
 
-    // ----------------------------------------------------
-    // 🔹 Recupero email, anche da Auth se mancante
-    // ----------------------------------------------------
-    let email = (afterData.email ?? "").toString().trim();
-    let emailLower = (afterData.emailLower ?? "").toString().trim();
-    if (!email || !emailLower) {
-      try {
-        const authUser = await admin.auth().getUser(uid);
-        email = authUser.email ?? email;
-        emailLower = authUser.email?.toLowerCase() ?? emailLower;
-      } catch (err) {
-        console.error(`⚠️ Errore getUser(${uid}):`, err);
-      }
-    }
-
-    // ----------------------------------------------------
-    // 🔹 Normalizzazione campi base (nome/cognome/foto/cover ecc.)
-    // ----------------------------------------------------
-    const pub = resolvePublicFromUserDoc(afterData, { email, emailLower });
-
-    // ----------------------------------------------------
-    // 🔒 Campi da NON propagare mai (interni / preferenze / privacy-map)
-    // ----------------------------------------------------
-    const BLOCKED_KEYS = new Set([
-      "_fieldSharing",
-      "fieldSharing",
-      "allLeaguesScope",
-      "sharedTo",
-      "sharedToEmails",
-      "sharedToLeagues",
-      "fcmTokens",
-    ]);
-
-    // Pool campi: SOLO profile (flat) + campi calcolati per ricerca/visualizzazione (members/UsersPublic)
-    const profileFieldPool: Record<string, any> = { ...profile };
-    delete profileFieldPool.privacy;
-
-    // 🔸 Custom fields (profile.custom) gestiti a livello di singola chiave (privacy: custom.<key>)
-    const customPool: Record<string, any> = (profile?.custom && typeof profile.custom === 'object' && !Array.isArray(profile.custom))
-      ? { ...(profile.custom as any) }
-      : {};
-    delete profileFieldPool.custom;
-
-
-
-    // ----------------------------------------------------
-    // 🔤 Canonicalizzazione chiavi (preferenza IT)
-    // Nota: NON modifica il documento Users (evita loop), ma normalizza ciò che PROPAGHIAMO.
-    // ----------------------------------------------------
-    const KEY_ALIAS_TO_IT: Record<string, string> = {
-      // anagrafica
-      firstName: "nome",
-      lastName: "cognome",
-      birthDate: "dataNascita",
-      placeOfBirth: "luogoNascita",
-      taxCode: "codiceFiscale",
-      fiscalCode: "codiceFiscale",
-      citizenship: "cittadinanza",
-      maritalStatus: "statoCivile",
-
-      // contatti
-      phone: "telefono",
-      phoneNumber: "telefono",
-
-      // campo pensiero
-      thought: "pensiero",
-    };
-
-    function canonicalFieldKey(raw: string): string {
-      const k = (raw ?? "").toString().trim();
-      if (!k) return k;
-      // privacy dei custom: custom.<key>
-      if (k.startsWith("custom.")) return k;
-      return KEY_ALIAS_TO_IT[k] ?? k;
-    }
-
-    function normalizeFlatKeys(src: Record<string, any>): Record<string, any> {
-      const out: Record<string, any> = {};
-      for (const [k, v] of Object.entries(src ?? {})) {
-        const ck = canonicalFieldKey(k);
-        // se arrivano sia alias EN che IT, preferisci IT se già presente e non vuoto
-        if (out[ck] == null || out[ck] === "") out[ck] = v;
-      }
-      return out;
-    }
-
-    function normalizePrivacyKeys(src: Record<string, any>): Record<string, any> {
-      const out: Record<string, any> = {};
-      for (const [k, v] of Object.entries(src ?? {})) {
-        const ck = canonicalFieldKey(k);
-        out[ck] = v;
-      }
-      return out;
-    }
-
-    const profileFieldPoolEff = normalizeFlatKeys(profileFieldPool);
-    const profilePrivacyEff = normalizePrivacyKeys(profilePrivacy);
-
-    const derivedPublic = memberPublicFields(pub);
-
-    function safeModeRaw(v: any): string {
-      return (v ?? "").toString().trim().toLowerCase();
-    }
-
-    // 🔎 Mode per campo: public/league/emails/uids/owner/special/comparto/private
-    // NOTE: compat client attuale
-    // - mode: 'public' | 'private' | 'shared'
-    // - league/allLeagues: true => condiviso con tutta la lega
-    // - emails/uids non vuoti => condiviso con lista
+    // ----------------------------
+    // 🔎 MODE RESOLVER
+    // ----------------------------
     function getMode(fieldKey: string): string {
-      // ✅ campi sempre pubblici
+      // sempre pubblici
       if (ALWAYS_PUBLIC_FIELDS.has(fieldKey)) return "public";
 
-      const s = (profilePrivacyEff?.[fieldKey] ?? {}) as Record<string, any>;
-      const rawMode = safeModeRaw(s?.mode);
+      const p = privacy[fieldKey] ?? {};
+      const mode = (p.mode ?? "").toString().toLowerCase();
 
-      const hasEmails = Array.isArray(s?.emails) && s.emails.length > 0;
-      const hasUids = Array.isArray(s?.uids) && s.uids.length > 0;
-      const isLeague = s?.league === true || s?.allLeagues === true;
-
-      // ✅ compat: se il client salva mode='private' ma ha target, trattalo come condivisione
-      if (rawMode === "private") {
-        if (isLeague) return "league";
-        if (hasEmails || hasUids) return hasUids && !hasEmails ? "uids" : "emails";
-        return "private";
-      }
-
-      // ✅ formato preferito: mode='shared' + target
-      if (rawMode === "shared") {
-        if (isLeague) return "league";
-        if (hasEmails || hasUids) return hasUids && !hasEmails ? "uids" : "emails";
-        return "private";
-      }
-
-      // ✅ mode nuovo (se già 'league/emails/uids/owner/special/comparto')
-      if (rawMode) return rawMode;
-
-      // ✅ legacy booleans (senza mode)
-      if (s?.public === true) return "public";
-      if (isLeague) return "league";
-      if (hasEmails || hasUids) return hasUids && !hasEmails ? "uids" : "emails";
-
-      // 🔒 default: sensibili → private, altri → private (safe-by-default)
+      if (mode) return mode;
       if (SENSITIVE_FIELDS.has(fieldKey)) return "private";
       return "private";
     }
 
-    function filterProfileByModes(allowedModes: string[]) {
+    // ----------------------------
+    // 🎯 FILTRI
+    // ----------------------------
+    function filterCustomByModes(modes: string[]) {
       const out: Record<string, any> = {};
-
-      // Top-level profile fields (flat)
-      for (const [k, v] of Object.entries(profileFieldPoolEff)) {
-        if (BLOCKED_KEYS.has(k)) continue;
-        const mode = getMode(k);
-        if (allowedModes.includes(mode)) out[k] = v;
+      for (const [k, v] of Object.entries(custom)) {
+        const mode = getMode(`custom.${k}`);
+        if (modes.includes(mode)) out[k] = v;
       }
-
-      // Custom fields (profile.custom) with privacy key: custom.<key>
-      const customOut: Record<string, any> = {};
-      for (const [ck, cv] of Object.entries(customPool)) {
-        const fk = `custom.${ck}`;
-        const mode = getMode(fk);
-        if (allowedModes.includes(mode)) customOut[ck] = cv;
-      }
-      if (Object.keys(customOut).length > 0) {
-        out.custom = customOut;
-      }
-
       return out;
     }
 
-    function realFieldCount(payload: Record<string, any>) {
-      // Se il payload usa lo schema {fields:{...}}, conta SOLO i campi visibili.
-      const f = (payload as any).fields;
-      if (f && typeof f === 'object' && !Array.isArray(f)) {
-        return Object.keys(f as any).length;
-      }
-      // Fallback legacy: uid + updatedAt non contano
-      return Math.max(0, Object.keys(payload).length - 2);
-    }
+    const profilePublic = filterCustomByModes(["public"]);
 
-    function stripToDeleteMap(keys: string[]) {
-      const m: Record<string, any> = {};
-      for (const k of keys) m[k] = admin.firestore.FieldValue.delete();
-      return m;
-    }
 
-    async function applyUpsertOrDelete(
-      docRef: FirebaseFirestore.DocumentReference,
-      payload: Record<string, any>,
-      label: string
-    ) {
-      const cnt = realFieldCount(payload);
-      if (cnt > 0) {
-        // merge:false per evitare che i campi diventati PRIVATI restino appesi
-        await docRef.set(payload, { merge: false });
-        console.log(`✅ ${label} aggiornato (fields: ${cnt})`);
-      } else {
-        await docRef.delete().catch(() => {});
-        console.log(`🧹 ${label} eliminato (0 fields)`);
-      }
-    }
+    // ----------------------------
+    // 👤 PROFILO PUBBLICO BASE
+    // ----------------------------
+    const pub = resolvePublicFromUserDoc(afterData);
+    const derived = memberPublicFields(pub);
 
-    // -----------------------------
-    // ✅ PAYLOADS
-    // -----------------------------
-    const profilePublic = filterProfileByModes(["public"]);
-    const profileLeague = filterProfileByModes(["league"]);
-    const profileShared = filterProfileByModes(["emails", "uids", "owner", "special", "comparto"]);
+    // forza always-public
+    if (pub.nome) profilePublic.nome = pub.nome;
+    if (pub.cognome) profilePublic.cognome = pub.cognome;
+    if (pub.nickname) profilePublic.nickname = pub.nickname;
+    if (pub.photoUrl) profilePublic.photoUrl = pub.photoUrl;
+    profilePublic.photoV = pub.photoV;
+    if (pub.coverUrl) profilePublic.coverUrl = pub.coverUrl;
+    profilePublic.coverV = pub.coverV;
 
-    // Members: campi public + derived (flat) — serve per liste/ordinamenti
-    const payloadPublicMembers = {
-      uid,
-      ...profilePublic,
-      ...derivedPublic,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    };
-
-    // UsersPublic: standardizza → fields: {...} + metadata/search al root
+    // ----------------------------
+    // 📦 PAYLOADS
+    // ----------------------------
     const payloadUsersPublic = {
       uid,
       fields: profilePublic,
-      ...derivedPublic,
+      ...derived,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
-    // sharedProfilesAll: SOLO league (fields)
-    const payloadLeague = {
+    const payloadMembers = {
       uid,
-      fields: profileLeague,
+      ...profilePublic,
+      ...derived,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
-    // sharedProfiles: SOLO emails/uids/owner/special/comparto (fields)
-    const payloadSharedBase = {
-      uid,
-      fields: profileShared,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    };
-
-    // ----------------------------------------------------
-    // 1️⃣ UsersPublic — SOLO PUBLIC (delete se vuoto)
-    // ---------------------------------------------------- — SOLO PUBLIC (delete se vuoto)
-    // ----------------------------------------------------
-    await applyUpsertOrDelete(db.collection("UsersPublic").doc(uid), payloadUsersPublic, `UsersPublic/${uid}`);
-
-    // ----------------------------------------------------
-    // 2️⃣ Members — SOLO PUBLIC + PULIZIA CAMPI RIMOSSI
-    // ----------------------------------------------------
-    let membersQs: FirebaseFirestore.QuerySnapshot<FirebaseFirestore.DocumentData>;
-    try {
-      membersQs = await db.collectionGroup("members").where("uid", "==", uid).get();
-      console.log(`📂 Query members completata — trovati: ${membersQs.size}`);
-    } catch (err: any) {
-      console.error(`⚠️ Errore nella query collectionGroup("members"): ${err.message}`);
-      membersQs = { docs: [], size: 0, empty: true } as any;
+    // ----------------------------
+    // 1️⃣ UsersPublic
+    // ----------------------------
+    if (Object.keys(profilePublic).length > 0) {
+      await db
+        .collection("UsersPublic")
+        .doc(uid)
+        .set(payloadUsersPublic, { merge: false });
+    } else {
+      await db.collection("UsersPublic").doc(uid).delete().catch(() => {});
     }
 
-    // Chiavi “profilo public” correnti (incl. derived)
-    const publicKeysNow = new Set(Object.keys(payloadPublicMembers));
+    // ----------------------------
+    // 2️⃣ Members (tutte le leghe)
+    // ----------------------------
+    const leagueIds: string[] = Array.isArray(afterData.leagueIds)
+      ? afterData.leagueIds
+      : [];
 
-    for (const doc of membersQs.docs) {
-      try {
-        // 1) merge dei campi public correnti
-        if (realFieldCount(payloadPublicMembers) > 0) {
-          await doc.ref.set(payloadPublicMembers, { merge: true });
-        }
+    for (const leagueId of leagueIds) {
+      const mRef = db
+        .collection("Leagues")
+        .doc(leagueId)
+        .collection("members")
+        .doc(uid);
 
-        // 2) pulizia: rimuovo campi “profilo” che non sono più public
-        const cur = (await doc.ref.get()).data() ?? {};
-        const keysToRemove: string[] = [];
-
-        for (const k of Object.keys(cur)) {
-          if (k === "uid") continue;
-
-          // campi tipici di membership da NON toccare
-          if (
-            k === "createdAt" ||
-            k === "joinedAt" ||
-            k === "roleId" ||
-            k === "role" ||
-            k === "active" ||
-            k === "status" ||
-            k === "joinCode" ||
-            k === "updatedAt"
-          ) {
-            continue;
-          }
-
-          // se era un campo profilo/ricerca e ora non è più nel payload public → delete
-          if (!publicKeysNow.has(k)) keysToRemove.push(k);
-        }
-
-        if (keysToRemove.length > 0) {
-          await doc.ref.set(stripToDeleteMap(keysToRemove), { merge: true });
-          console.log(`🧹 Pulizia member: ${doc.ref.path} (rimossi ${keysToRemove.length} campi)`);
-        }
-
-        console.log(`🔄 Aggiornato member: ${doc.ref.path}`);
-      } catch (innerErr) {
-        console.error(`❌ Errore aggiornando/pulendo ${doc.ref.path}:`, innerErr);
-      }
+      await mRef.set(payloadMembers, { merge: true });
     }
-
-    // Leghe coinvolte
-    const leagueIds = Array.from(
-      new Set(membersQs.docs.map((d) => d.ref.parent.parent?.id ?? "").filter(Boolean))
-    );
-    console.log(`🏆 Leghe da aggiornare: ${leagueIds.join(", ") || "(nessuna)"}`);
-
-    // Targets: union di email/uids presenti nelle regole privacy
-    const emailTargets = Array.from(
-      new Set(
-        Object.values(profilePrivacyEff)
-          .flatMap((v: any) => (Array.isArray(v?.emails) ? v.emails : []))
-          .map((e: any) => (e ?? "").toString().trim().toLowerCase())
-          .filter(Boolean)
-)
-);
-
-const uidTargets = Array.from(
-new Set(
-        Object.values(profilePrivacyEff)
-          .flatMap((v: any) => (Array.isArray(v?.uids) ? v.uids : []))
-          .map((x: any) => (x ?? "").toString().trim())
-          .filter(Boolean)
-)
-);
-
-const wantsComparto = Object.values(profilePrivacyEff).some((v: any) => safeModeRaw(v?.mode) === "comparto");
-const wantsOwner = Object.values(profilePrivacyEff).some((v: any) => safeModeRaw(v?.mode) === "owner");
-const wantsSpecial = Object.values(profilePrivacyEff).some((v: any) => safeModeRaw(v?.mode) === "special");
-
-// ----------------------------------------------------
-// 3️⃣ sharePreferences + sharedProfilesAll + sharedProfiles
-// ----------------------------------------------------
-for (const leagueId of leagueIds) {
-      const leagueRef = db.collection("Leagues").doc(leagueId);
-
-      // sharePreferences (sempre)
-      await leagueRef.collection("sharePreferences").doc(uid).set(
-        {
-          uid,
-          allLeaguesScope: allLeaguesScope ?? {},
-          fieldSharing: profilePrivacyEff ?? {},
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true }
-      );
-
-      // sharedProfilesAll — SOLO LEAGUE (delete se vuoto)
-      await applyUpsertOrDelete(
-        leagueRef.collection("sharedProfilesAll").doc(uid),
-        payloadLeague,
-        `sharedProfilesAll/${uid} in ${leagueId}`
-      );
-
-      // compartoLower owner (serve per regola allowSameComparto)
-      let ownerCompartoLower: string | null = null;
-      if (wantsComparto) {
-        try {
-          const mSnap = await leagueRef.collection("members").doc(uid).get();
-          ownerCompartoLower = ((mSnap.data()?.compartoLower ?? "") as string).toString().trim().toLowerCase() || null;
-        } catch (_) {
-          ownerCompartoLower = null;
-        }
-      }
-
-      // sharedProfiles — SOLO SHARED (delete se vuoto)
-      const payloadSharedWithTargets = {
-        ...payloadSharedBase,
-        allowLeagueMembers: false,
-        allowedEmailsLower: emailTargets,
-        allowedUids: uidTargets,
-        sharedToEmails: emailTargets,
-        sharedToUids: uidTargets,
-
-        allowSameComparto: wantsComparto,
-        ownerCompartoLower: ownerCompartoLower,
-        allowOwner: wantsOwner,
-        allowSpecial: wantsSpecial,
-
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      };
-
-      await applyUpsertOrDelete(
-        leagueRef.collection("sharedProfiles").doc(uid),
-        payloadSharedWithTargets,
-        `sharedProfiles/${uid} in ${leagueId}`
-      );
-    }
-
-    console.log(`🎯 onUserProfileWrite(${uid}) — sincronizzazione completata.`);
   }
 );
 
 
-
-
+// ======================================================
+        // ==== END onUserProfileWrite ====
+// ======================================================
 
 
 

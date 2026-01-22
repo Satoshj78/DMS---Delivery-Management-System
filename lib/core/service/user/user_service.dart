@@ -31,8 +31,17 @@ class UserService {
   static DocumentReference<Map<String, dynamic>> sharedToRef(String ownerUid, String viewerUid) =>
       sharedToCol(ownerUid).doc(viewerUid);
 
-  static DocumentReference<Map<String, dynamic>> leagueSharedProfileRef(String leagueId, String targetUid) =>
-      _db.collection('Leagues').doc(leagueId).collection('sharedProfiles').doc(targetUid);
+  static DocumentReference<Map<String, dynamic>> leagueSharedProfileTargetsRef(String leagueId, String targetUid) =>
+      _db.collection('Leagues').doc(leagueId).collection('sharedProfilesTargets').doc(targetUid);
+
+  static DocumentReference<Map<String, dynamic>> leagueSharedProfileCompartoRef(String leagueId, String targetUid) =>
+      _db.collection('Leagues').doc(leagueId).collection('sharedProfilesComparto').doc(targetUid);
+
+  static DocumentReference<Map<String, dynamic>> leagueSharedProfileSpecialRef(String leagueId, String targetUid) =>
+      _db.collection('Leagues').doc(leagueId).collection('sharedProfilesSpecial').doc(targetUid);
+
+  static DocumentReference<Map<String, dynamic>> leagueSharedProfileOwnerRef(String leagueId, String targetUid) =>
+      _db.collection('Leagues').doc(leagueId).collection('sharedProfilesOwner').doc(targetUid);
 
   // ---------------- streams ----------------
   static Stream<QuerySnapshot<Map<String, dynamic>>> streamMembers(String leagueId) {
@@ -844,10 +853,27 @@ class UserService {
     } catch (_) {}
 
     // shared in league (PRIVILEGED / allowlist / comparti speciali)
-    try {
-      final l = await leagueSharedProfileRef(leagueId, targetUid).get();
-      leaguePrivFields = _extractFieldsFromSharedDoc(l.data());
-    } catch (_) {}
+    // ⚠️ Ogni doc contiene SOLO i campi di quel tipo di condivisione (così non si leakano
+    // campi owner/special a chi è in allowlist e viceversa).
+    Future<Map<String, dynamic>> _tryReadFields(DocumentReference<Map<String, dynamic>> ref) async {
+      try {
+        final s = await ref.get();
+        return _extractFieldsFromSharedDoc(s.data());
+      } catch (_) {
+        return <String, dynamic>{};
+      }
+    }
+
+    final targets = await _tryReadFields(leagueSharedProfileTargetsRef(leagueId, targetUid));
+    final comparto = await _tryReadFields(leagueSharedProfileCompartoRef(leagueId, targetUid));
+    final special = await _tryReadFields(leagueSharedProfileSpecialRef(leagueId, targetUid));
+    final owner = await _tryReadFields(leagueSharedProfileOwnerRef(leagueId, targetUid));
+
+    leaguePrivFields = <String, dynamic>{};
+    leaguePrivFields.addAll(targets);
+    leaguePrivFields.addAll(comparto);
+    leaguePrivFields.addAll(special);
+    leaguePrivFields.addAll(owner);
 
     // direct share (1-to-1)
     try {

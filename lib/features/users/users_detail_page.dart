@@ -809,52 +809,68 @@ class _UserDetailPageState extends State<UserDetailPage>
     }).toList();
   }
 
-  Future<void> _persistField(bool isUserTarget, String key, dynamic value) async {
-    if (!isUserTarget) {
-      // 🔒 Con le rules attuali il client NON scrive su Leagues/{leagueId}/members.
-      // I campi di lega vanno gestiti da Cloud Function / callable.
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Campo di lega: modifica gestita dal backend.'),
-          ),
-        );
+
+
+  Future<void> _persistField(
+      bool isUserTarget,
+      String key,
+      dynamic value,
+      ) async {
+    if (!isUserTarget) return;
+
+    final kk = key.trim();
+    final updates = <String, dynamic>{};
+
+    // ===============================
+    // 🔐 POLICY (privacy)
+    // ===============================
+    if (kk.endsWith('__policy')) {
+      final baseKey = kk.substring(0, kk.length - '__policy'.length);
+
+      final Map<String, dynamic> raw =
+      value is Map<String, dynamic>
+          ? Map<String, dynamic>.from(value)
+          : <String, dynamic>{};
+
+      final vis = (raw['visibility'] ?? '').toString();
+
+      String mode;
+      switch (vis) {
+        case 'publicGlobal':
+          mode = 'public';
+          break;
+        case 'publicLeague':
+          mode = 'league';
+          break;
+        case 'restricted':
+          mode = 'restricted';
+          break;
+        default:
+          mode = 'private';
       }
-      return;
+
+      updates['profile.privacy.$baseKey'] = {
+        'mode': mode,
+        ...raw,
+      };
     }
 
-    // ✅ Nickname unico globale: passa SEMPRE dalla callable.
-    final k = key.trim();
-    if (k == 'nickName' || k == 'nickname' || k == 'NickName') {
-      final nextNick = (value ?? '').toString().trim();
-      if (nextNick.isEmpty) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Il nickname non può essere vuoto.')),
-          );
-        }
-        return;
-      }
-      try {
-        final callable = FirebaseFunctions.instance.httpsCallable('setNickname');
-        await callable.call(<String, dynamic>{'nickname': nextNick});
-        setState(() {
-          _userValues['nickName'] = nextNick;
-          _userValues['nickname'] = nextNick;
-          _userValues['NickName'] = nextNick;
-        });
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Nickname non valido o già usato: $e')),
-          );
-        }
-      }
-      return;
+    // ===============================
+    // 📦 VALUE
+    // ===============================
+    else {
+      // ✅ SOLO profile.custom
+      updates['profile.custom.$kk'] = value;
     }
 
-    await _userRef(widget.userId).set({key: value}, SetOptions(merge: true));
+    await _userRef(widget.userId).set(
+      updates,
+      SetOptions(merge: true),
+    );
   }
+
+
+
 
   // ------------------------------------------------------------
   // AVATAR FULLSCREEN
