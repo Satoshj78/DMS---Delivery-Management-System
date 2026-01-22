@@ -52,7 +52,6 @@ class UserDetailPage extends StatefulWidget {
 
 class _UserDetailPageState extends State<UserDetailPage>
     with TickerProviderStateMixin {
-  final _db = FirebaseFirestore.instance;
   final _auth = FirebaseAuth.instance;
   final _picker = ImagePicker();
   final ScrollController _scroll = ScrollController();
@@ -96,14 +95,16 @@ class _UserDetailPageState extends State<UserDetailPage>
     super.dispose();
   }
 
-  DocumentReference<Map<String, dynamic>> _userRef(String uid) =>
-      _db.collection('Users').doc(uid);
+  DocumentReference<Map<String, dynamic>> _userReadRef(String uid) =>
+      FirebaseFirestore.instance.collection('Users').doc(uid);
 
-  DocumentReference<Map<String, dynamic>> _memberRef(String uid) => _db
-      .collection('Leagues')
-      .doc(widget.leagueId)
-      .collection('members')
-      .doc(uid);
+  DocumentReference<Map<String, dynamic>> _memberRef(String uid) =>
+      FirebaseFirestore.instance
+          .collection('Leagues')
+          .doc(widget.leagueId)
+          .collection('members')
+          .doc(uid);
+
 
   DocumentReference<Map<String, dynamic>>? get _viewerMemberRef {
     if (_viewerUid.isEmpty) return null;
@@ -231,7 +232,7 @@ class _UserDetailPageState extends State<UserDetailPage>
         Widget buildWithViewerMember() {
           // ✅ Users/{uid} è privato: lo leggiamo SOLO se sto guardando me stesso.
           if (_isSelf) {
-            final userStream = _userRef(widget.userId).snapshots();
+            final userStream = _userReadRef(widget.userId).snapshots();
             return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
               stream: userStream,
               builder: (context, userSnap) {
@@ -818,56 +819,24 @@ class _UserDetailPageState extends State<UserDetailPage>
       ) async {
     if (!isUserTarget) return;
 
-    final kk = key.trim();
-    final updates = <String, dynamic>{};
-
-    // ===============================
-    // 🔐 POLICY (privacy)
-    // ===============================
-    if (kk.endsWith('__policy')) {
-      final baseKey = kk.substring(0, kk.length - '__policy'.length);
-
-      final Map<String, dynamic> raw =
-      value is Map<String, dynamic>
-          ? Map<String, dynamic>.from(value)
-          : <String, dynamic>{};
-
-      final vis = (raw['visibility'] ?? '').toString();
-
-      String mode;
-      switch (vis) {
-        case 'publicGlobal':
-          mode = 'public';
-          break;
-        case 'publicLeague':
-          mode = 'league';
-          break;
-        case 'restricted':
-          mode = 'restricted';
-          break;
-        default:
-          mode = 'private';
-      }
-
-      updates['profile.privacy.$baseKey'] = {
-        'mode': mode,
-        ...raw,
-      };
-    }
-
-    // ===============================
-    // 📦 VALUE
-    // ===============================
-    else {
-      // ✅ SOLO profile.custom
-      updates['profile.custom.$kk'] = value;
-    }
-
-    await _userRef(widget.userId).set(
-      updates,
-      SetOptions(merge: true),
+    final callable = FirebaseFunctions.instance.httpsCallable(
+      'updateUserProfileField', // ⬅️ nome function
     );
+
+    try {
+      await callable.call(<String, dynamic>{
+        'fieldKey': key,
+        'value': value,
+      });
+    } on FirebaseFunctionsException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.message ?? 'Errore salvataggio')),
+        );
+      }
+    }
   }
+
 
 
 
@@ -930,22 +899,21 @@ class _UserDetailPageState extends State<UserDetailPage>
       await ref.putData(jpeg, SettableMetadata(contentType: 'image/jpeg'));
       final url = await ref.getDownloadURL();
 
-      final field = isCover ? 'coverUrl' : 'photoUrl';
-      final vField = isCover ? 'coverV' : 'photoV';
 
-      // NOTE: il client aggiorna SOLO Users/{uid}. La propagazione verso members/UsersPublic/sharedProfiles
-      // avviene tramite Cloud Function.
-      await _userRef(uid).set({
-        field: url,
-        vField: FieldValue.increment(1),
-        'profile': {
-          field: url,
-          vField: FieldValue.increment(1),
-        },
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+      final callable = FirebaseFunctions.instance
+          .httpsCallable('setUserPublicImage');
 
-      setState(() => _userValues[field] = url);
+      await callable.call({
+        'field': isCover ? 'cover' : 'photo',
+        'url': url,
+      });
+
+
+
+      setState(() {
+        _userValues[isCover ? 'coverUrl' : 'photoUrl'] = url;
+      });
+
     } finally {
       if (mounted) setState(() => _savingImage = false);
     }
