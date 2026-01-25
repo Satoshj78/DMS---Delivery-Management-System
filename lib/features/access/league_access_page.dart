@@ -319,18 +319,7 @@ class _LeagueAccessPageState extends State<LeagueAccessPage> with TickerProvider
 
     setState(() => _isLoading = true);
     try {
-      // ✅ NON bloccare la creazione lega se il sync profilo fallisce
-      try {
-        final uSnap = await _db.collection('Users').doc(user.uid).get();
-        final uData = uSnap.data() ?? {};
-        final profile = UserService.buildProfileFromUserDoc(uData);
-        profile['nome'] = nomeCreatore;
-        profile['cognome'] = cognomeCreatore;
-        await UserService.updateMyGlobalProfileAndSync(profile: profile);
-      } catch (e) {
-        debugPrint('Sync profilo fallito (continuo): $e');
-      }
-
+      // ✅ SOLO Cloud Function
       final res = await _api.createLeague(
         nome: nomeLega,
         creatorNome: nomeCreatore,
@@ -350,6 +339,7 @@ class _LeagueAccessPageState extends State<LeagueAccessPage> with TickerProvider
       if (mounted) setState(() => _isLoading = false);
     }
   }
+
 
 
   // ---------------- UI HELPERS ----------------

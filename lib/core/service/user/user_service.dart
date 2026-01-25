@@ -25,23 +25,7 @@ class UserService {
   static CollectionReference<Map<String, dynamic>> rolesCol(String leagueId) =>
       _db.collection('Leagues').doc(leagueId).collection('roles');
 
-  static CollectionReference<Map<String, dynamic>> sharedToCol(String ownerUid) =>
-      _db.collection('Users').doc(ownerUid).collection('sharedTo');
 
-  static DocumentReference<Map<String, dynamic>> sharedToRef(String ownerUid, String viewerUid) =>
-      sharedToCol(ownerUid).doc(viewerUid);
-
-  static DocumentReference<Map<String, dynamic>> leagueSharedProfileTargetsRef(String leagueId, String targetUid) =>
-      _db.collection('Leagues').doc(leagueId).collection('sharedProfilesTargets').doc(targetUid);
-
-  static DocumentReference<Map<String, dynamic>> leagueSharedProfileCompartoRef(String leagueId, String targetUid) =>
-      _db.collection('Leagues').doc(leagueId).collection('sharedProfilesComparto').doc(targetUid);
-
-  static DocumentReference<Map<String, dynamic>> leagueSharedProfileSpecialRef(String leagueId, String targetUid) =>
-      _db.collection('Leagues').doc(leagueId).collection('sharedProfilesSpecial').doc(targetUid);
-
-  static DocumentReference<Map<String, dynamic>> leagueSharedProfileOwnerRef(String leagueId, String targetUid) =>
-      _db.collection('Leagues').doc(leagueId).collection('sharedProfilesOwner').doc(targetUid);
 
   // ---------------- streams ----------------
   static Stream<QuerySnapshot<Map<String, dynamic>>> streamMembers(String leagueId) {
@@ -113,9 +97,8 @@ class UserService {
     'thought': 'pensiero',
 
     // nickname
-    'nickname': 'nickName',
-    'NickName': 'nickName',
-    'nickName': 'nickName',
+    'nickName': 'nickname',
+    'NickName': 'nickname',
   };
 
   static String _canonicalFieldKey(String raw) {
@@ -495,52 +478,6 @@ class UserService {
   }
 
 
-  static Map<String, dynamic> _buildUsersPublicDoc({
-    required String uid,
-    required Map<String, dynamic> profile,
-    required Map<String, dynamic> privacy,
-  }) {
-    final nome = _s(profile['nome']);
-    final cognome = _s(profile['cognome']);
-    final photoUrl = _s(profile['photoUrl']);
-    final coverUrl = _s(profile['coverUrl']);
-
-    final fields = <String, dynamic>{};
-
-    // ✅ questi 4 sono SEMPRE pubblici (li metto anche in fields)
-    final coreKeys = <String>['nome', 'cognome', 'photoUrl', 'coverUrl'];
-    for (final k in coreKeys) {
-      final v = _extractFieldValue(profile, k);
-      if (v != null) fields[k] = v;
-    }
-
-    // Altri campi: SOLO mode=public
-    for (final e in privacy.entries) {
-      final key = _s(e.key);
-      if (coreKeys.contains(key)) continue; // già gestiti
-      final mode = _s(_map(e.value)['mode']).toLowerCase();
-      if (mode != 'public') continue;
-
-      final val = _extractFieldValue(profile, key);
-      if (val != null) fields[key] = val;
-    }
-
-    return {
-      'uid': uid,
-
-      // Root convenience (sempre pubblici)
-      'displayNome': _nullIfEmpty(nome),
-      'displayCognome': _nullIfEmpty(cognome),
-      'displayNomeLower': nome.toLowerCase(),
-      'displayCognomeLower': cognome.toLowerCase(),
-      'photoUrl': photoUrl.isEmpty ? null : photoUrl,
-      'coverUrl': coverUrl.isEmpty ? null : coverUrl,
-
-      'fields': fields,
-      'updatedAt': FieldValue.serverTimestamp(),
-    };
-  }
-
 
   // ==========================================================
   // API “comode”
@@ -550,13 +487,6 @@ class UserService {
     return ensureMemberDoc(leagueId: leagueId, uid: myUid);
   }
 
-  static Future<void> updateMyGlobalProfileAndSync({
-    required Map<String, dynamic> profile,
-    Map<String, dynamic>? privacy,
-  }) async {
-    final myUid = _requireLoggedUid();
-    return updateGlobalProfileAndSync(uid: myUid, profile: profile, privacy: privacy);
-  }
 
 // ==========================================================
 // ✅ members: SOLO PUBLIC PROFILE (no sensibili)
@@ -595,218 +525,29 @@ class UserService {
 // Tutta la propagazione (UsersPublic, members, sharedProfiles, sharedProfilesAll)
 // viene gestita automaticamente dalla Cloud Function onUserProfileWrite.
 // ==========================================================
+  // ⚠️ DISABILITATO: le modifiche profilo passano SOLO da Cloud Function
   static Future<void> updateGlobalProfileAndSync({
     required String uid,
     required Map<String, dynamic> profile,
     Map<String, dynamic>? privacy,
   }) async {
-    _assertSelfUid(uid);
-
-    const corePublicKeys = <String>{'nome', 'cognome', 'photoUrl', 'coverUrl'};
-
-    final uRef = userRef(uid);
-    final snap = await uRef.get();
-    final data = snap.data() ?? {};
-
-    final leagueIds = (data['leagueIds'] is List)
-        ? (data['leagueIds'] as List)
-        .map((e) => _s(e))
-        .where((e) => e.isNotEmpty)
-        .toList()
-        : <String>[];
-
-    final prevProfile = _map(data['profile']);
-    final prevPrivacy = normalizePrivacy(_map(prevProfile['privacy']));
-
-    // ✅ se privacy è null NON azzerare
-    final nextPrivacy = (privacy == null) ? prevPrivacy : normalizePrivacy(privacy);
-
-    // ✅ merge profilo (non perdere campi non passati)
-    final mergedProfile = Map<String, dynamic>.from(prevProfile);
-    mergedProfile.addAll(profile);
-    mergedProfile['privacy'] = nextPrivacy;
-
-    // ✅ canonicalizza chiavi (EN->IT) e rimuove alias EN
-    final nextProfile = canonicalizeProfileKeys(mergedProfile);
-    nextProfile['privacy'] = normalizePrivacy(_map(nextProfile['privacy']));
-
-    // ✅ NickName e' unico globale: se cambia, deve passare dalla callable.
-    // Per evitare permission-denied (rules bloccano update diretto), lo rimuoviamo dal payload
-    // e lasciamo che sia la callable ad aggiornare Users/{uid}.
-    final prevNick = _extractNickFromMap(prevProfile.isNotEmpty ? prevProfile : data);
-    final nextNick = _extractNickFromMap(nextProfile);
-    await _setNicknameIfNeeded(uid: uid, nextNick: nextNick, prevNick: prevNick);
-    nextProfile.remove('nickName');
-    nextProfile.remove('nickname');
-    nextProfile.remove('NickName');
-
-    final publicProfile = buildPublicProfile(nextProfile);
-
-    // -------------------------
-    // Helpers locali
-    // -------------------------
-    String audNorm(String raw) {
-      final u = _s(raw).toUpperCase().trim();
-      if (u == 'ALL_MEMBERS' || u == 'MEMBERS' || u == 'ALL' || u == 'PUBLIC') return 'ALL_MEMBERS';
-      return 'PRIVILEGED';
-    }
-
-    Map<String, String> effectiveLeagueScopes(Map<String, dynamic> m) {
-      final out = <String, String>{};
-      final allLeagues = (m['allLeagues'] == true);
-      if (allLeagues) {
-        final scopeRaw = _s(m['allLeaguesScope']);
-        final aud = audNorm(scopeRaw.isEmpty ? 'ALL_MEMBERS' : scopeRaw);
-        for (final lid in leagueIds) {
-          if (lid.isNotEmpty) out[lid] = aud;
-        }
-      }
-      final scopes = _map(m['leagueScopes']);
-      for (final e in scopes.entries) {
-        final lid = _s(e.key);
-        if (lid.isEmpty) continue;
-        out[lid] = audNorm(_s(e.value));
-      }
-      return out;
-    }
-
-    // ==========================
-    // PREV destinations (per delete)
-    // ==========================
-    final prevUserDests = <String>{};
-    final prevEmailDests = <String>{};
-
-    for (final e in prevPrivacy.entries) {
-      final m = _map(e.value);
-      if (_s(m['mode']).toLowerCase() != 'shared') continue;
-      prevUserDests.addAll(_listStr(m['users']));
-      prevEmailDests.addAll(
-        _listStr(m['emails']).map((x) => x.toLowerCase()).where((x) => x.isNotEmpty),
-      );
-    }
-
-    // ==========================
-    // BUILD next docs (solo sharedTo e sharedToEmails)
-    // ==========================
-    final userToFields = <String, Map<String, dynamic>>{};
-    final emailToFields = <String, Map<String, dynamic>>{};
-
-    for (final e in nextPrivacy.entries) {
-      final key = e.key;
-      if (corePublicKeys.contains(key)) continue;
-
-      final m = _map(e.value);
-      final mode = _s(m['mode']).toLowerCase();
-      if (mode != 'shared') continue;
-
-      final value = _extractFieldValue(nextProfile, key);
-      if (value == null) continue;
-
-      final users = _listStr(m['users']);
-      final emails = _listStr(m['emails'])
-          .map((x) => x.toLowerCase())
-          .where((x) => x.isNotEmpty)
-          .toList();
-
-      for (final vu in users) {
-        userToFields.putIfAbsent(vu, () => <String, dynamic>{});
-        userToFields[vu]![key] = value;
-      }
-
-      for (final em in emails) {
-        emailToFields.putIfAbsent(em, () => <String, dynamic>{});
-        emailToFields[em]![key] = value;
-      }
-    }
-
-    final nextUserDests = userToFields.keys.toSet();
-    final nextEmailDests = emailToFields.keys.toSet();
-
-    final batch = _db.batch();
-
-    // 1️⃣ Users (privato)
-    batch.set(
-      uRef,
-      {
-        'profile': nextProfile,
-        'updatedAt': FieldValue.serverTimestamp(),
-      },
-      // IMPORTANTISSIMO: sostituisce l'intero campo profile (spariscono le chiavi alias EN)
-      SetOptions(mergeFields: ['profile', 'updatedAt']),
+    throw UnsupportedError(
+      'updateGlobalProfileAndSync DISABILITATO. '
+          'Usa updateMyProfileViaFunction (Cloud Function).',
     );
-
-    // 2️⃣ sharedTo per utenti specifici
-    for (final viewerUid in nextUserDests) {
-      final fields = userToFields[viewerUid] ?? <String, dynamic>{};
-      batch.set(
-        sharedToRef(uid, viewerUid),
-        {
-          'ownerUid': uid,
-          'viewerUid': viewerUid,
-          'fields': fields,
-          'updatedAt': FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
-    }
-    for (final oldViewer in prevUserDests.difference(nextUserDests)) {
-      batch.delete(sharedToRef(uid, oldViewer));
-    }
-
-    // 3️⃣ sharedToEmails
-    final sharedToEmailsCol = userRef(uid).collection('sharedToEmails');
-    for (final emailLower in nextEmailDests) {
-      final fields = emailToFields[emailLower] ?? <String, dynamic>{};
-      batch.set(
-        sharedToEmailsCol.doc(emailLower),
-        {
-          'ownerUid': uid,
-          'viewerEmailLower': emailLower,
-          'fields': fields,
-          'updatedAt': FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
-    }
-    for (final oldEmail in prevEmailDests.difference(nextEmailDests)) {
-      batch.delete(sharedToEmailsCol.doc(oldEmail));
-    }
-
-    await batch.commit();
-
-    // ✅ STOP QUI
-    // Niente più scritture su sharedProfiles, sharedProfilesAll o members:
-    // vengono aggiornate automaticamente dal trigger onUserProfileWrite.
   }
 
-
-
-
-  /// Estrae i campi condivisibili in base alla privacy.
-  static Map<String, dynamic> _extractSharedFields(
-      Map<String, dynamic> profile,
-      Map<String, dynamic> privacy,
-      ) {
-    final out = <String, dynamic>{};
-    void add(String key, dynamic value) {
-      if (value != null && value.toString().trim().isNotEmpty) out[key] = value;
-    }
-
-    bool isShared(String key) {
-      final p = (privacy[key] ?? {}) as Map;
-      final mode = (p['mode'] ?? 'public').toString();
-      final league = (p['league'] == true);
-      final emails = (p['emails'] ?? []) as List;
-      return mode == 'public' || league || emails.isNotEmpty;
-    }
-
-    // esempio minimo — puoi ampliare con gli altri campi che vuoi condividere
-    if (isShared('telefono')) add('telefono', profile['recapiti']?['telefono']);
-    if (isShared('ibanDefault')) add('ibanDefault', profile['anagrafica']?['ibanDefault']);
-    if (isShared('codiceFiscale')) add('codiceFiscale', profile['anagrafica']?['codiceFiscale']);
-    if (isShared('residenza')) add('residenza', profile['residenza']);
-    return out;
+// ⚠️ DISABILITATO: wrapper legacy
+  static Future<void> updateMyGlobalProfileAndSync({
+    required Map<String, dynamic> profile,
+    Map<String, dynamic>? privacy,
+  }) async {
+    throw UnsupportedError(
+      'updateMyGlobalProfileAndSync DISABILITATO. '
+          'Usa updateMyProfileViaFunction (Cloud Function).',
+    );
   }
+
 
 
 
@@ -818,96 +559,36 @@ class UserService {
   static Future<Map<String, dynamic>> fetchVisibleFieldsForViewer({
     required String leagueId,
     required String targetUid,
-    bool includeUsersPublic = true,
   }) async {
+
     final me = FirebaseAuth.instance.currentUser;
     if (me == null) throw StateError('Not logged');
 
+    // SELF → profilo completo privato
     if (me.uid == targetUid) {
-      // self: leggi completo dal profilo privato
       final uSnap = await userRef(targetUid).get();
       final uData = uSnap.data() ?? {};
-      final full = buildProfileFromUserDoc(uData);
       return {
-        'profile': full,
+        'profile': buildProfileFromUserDoc(uData),
         'sharedFields': <String, dynamic>{},
       };
     }
 
+    // NON-SELF → SOLO UsersPublic
     Map<String, dynamic> publicFields = {};
-    Map<String, dynamic> leagueAllFields = {};
-    Map<String, dynamic> leaguePrivFields = {};
-    Map<String, dynamic> directFields = {};
-    // UsersPublic (safe)
-    if (includeUsersPublic) {
-      try {
-        final p = await usersPublicRef(targetUid).get();
-        publicFields = _extractFieldsFromSharedDoc(p.data());
-      } catch (_) {}
-    }
 
-    // shared in league (ALL MEMBERS)
     try {
-      final a = await leagueSharedProfileAllRef(leagueId, targetUid).get();
-      leagueAllFields = _extractFieldsFromSharedDoc(a.data());
+      final p = await usersPublicRef(targetUid).get();
+      publicFields = _extractFieldsFromSharedDoc(p.data());
     } catch (_) {}
 
-    // shared in league (PRIVILEGED / allowlist / comparti speciali)
-    // ⚠️ Ogni doc contiene SOLO i campi di quel tipo di condivisione (così non si leakano
-    // campi owner/special a chi è in allowlist e viceversa).
-    Future<Map<String, dynamic>> _tryReadFields(DocumentReference<Map<String, dynamic>> ref) async {
-      try {
-        final s = await ref.get();
-        return _extractFieldsFromSharedDoc(s.data());
-      } catch (_) {
-        return <String, dynamic>{};
-      }
-    }
-
-    final targets = await _tryReadFields(leagueSharedProfileTargetsRef(leagueId, targetUid));
-    final comparto = await _tryReadFields(leagueSharedProfileCompartoRef(leagueId, targetUid));
-    final special = await _tryReadFields(leagueSharedProfileSpecialRef(leagueId, targetUid));
-    final owner = await _tryReadFields(leagueSharedProfileOwnerRef(leagueId, targetUid));
-
-    leaguePrivFields = <String, dynamic>{};
-    leaguePrivFields.addAll(targets);
-    leaguePrivFields.addAll(comparto);
-    leaguePrivFields.addAll(special);
-    leaguePrivFields.addAll(owner);
-
-    // direct share (1-to-1)
-    try {
-      final d = await sharedToRef(targetUid, me.uid).get();
-      directFields = _extractFieldsFromSharedDoc(d.data());
-    } catch (_) {}
-
-    // merge priority: public < leagueAll < leaguePriv < direct
-    final merged = <String, dynamic>{};
-    merged.addAll(publicFields);
-    merged.addAll(leagueAllFields);
-    merged.addAll(leaguePrivFields);
-    merged.addAll(directFields);
 
     return {
-      'profile': <String, dynamic>{}, // non self: profilo privato non leggibile
-      'sharedFields': merged,
+      'profile': <String, dynamic>{},
+      'sharedFields': publicFields,
     };
   }
 
-
-
-  // ==========================================================
-  // Refs
-  // ==========================================================
-  static DocumentReference<Map<String, dynamic>> leagueSharedProfileAllRef(
-      String leagueId,
-      String targetUid,
-      ) =>
-      _db
-          .collection('Leagues')
-          .doc(leagueId)
-          .collection('sharedProfilesAll')
-          .doc(targetUid);
 
 
 
@@ -1224,19 +905,16 @@ class UserService {
     final batch = _db.batch();
 
     final userPayload = <String, dynamic>{
-      'uid': me.uid,
-      'email': me.email,
-      'emailLower': myEmailLower,
       'activeLeagueId': leagueId,
       'leagueIds': FieldValue.arrayUnion([leagueId]),
       'profile': existingProfile, // privato
       'updatedAt': FieldValue.serverTimestamp(),
     };
+
     if (!uSnap.exists) {
       userPayload['createdAt'] = FieldValue.serverTimestamp();
     }
 
-    batch.set(uRef, userPayload, SetOptions(merge: true));
 
     // ✅ member: solo safe
     batch.set(mRef, {
@@ -1407,7 +1085,38 @@ class UserService {
     );
     return uri.toString();
   }
+
+
+  /// ✅ NEW: server-driven profile update (no Firestore writes from client)
+  static Future<void> updateMyProfileViaFunction({
+    required Map<String, dynamic> fields,
+    required Map<String, dynamic> privacy,
+  }) async {
+    final fn = FirebaseFunctions.instance.httpsCallable('updateMyProfile');
+    await fn.call({
+      'fields': fields,
+      'privacy': privacy,
+    });
+  }
+
+
+  /// ✅ server-driven single field update (HR / policy / etc.)
+  static Future<void> updateMyProfileFieldViaFunction({
+    required String fieldKey,
+    required dynamic value,
+  }) async {
+    final fn = FirebaseFunctions.instance.httpsCallable('updateUserProfileField');
+    await fn.call({
+      'fieldKey': fieldKey,
+      'value': value,
+    });
+  }
+
+
+
+
 }
+
 
 class _LeagueMeta {
   final String joinCode;

@@ -3,7 +3,7 @@
 // + tab Profilo + tab HR con policy per campo
 
 import 'dart:typed_data';
-import 'dart:ui';
+import 'dart:ui' as ui;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -23,9 +23,6 @@ import 'package:dms_app/core/user_fields/hr_policy_dialog.dart';
 import 'package:dms_app/core/user_fields/hr_policy_resolver.dart';
 import 'package:dms_app/core/service/user/user_service.dart';
 import 'package:dms_app/features/users/widgets/user_profile_header_sliver.dart';
-
-
-
 
 
 
@@ -197,7 +194,6 @@ class _UserDetailPageState extends State<UserDetailPage>
       final data = await UserService.fetchVisibleFieldsForViewer(
         leagueId: widget.leagueId,
         targetUid: widget.userId,
-        includeUsersPublic: false,
       );
       final shared = (data['sharedFields'] is Map)
           ? Map<String, dynamic>.from(data['sharedFields'] as Map)
@@ -377,9 +373,9 @@ class _UserDetailPageState extends State<UserDetailPage>
                   final offset = _scroll.hasClients ? _scroll.offset : 0.0;
                   final t = (offset / 260).clamp(0.0, 1.0);
 
-                  final avatarSize = lerpDouble(150, 36, t)!;
+                  final avatarSize = ui.lerpDouble(150, 36, t)!;
 
-                  final avatarTop = lerpDouble(
+                  final avatarTop = ui.lerpDouble(
                     250,
                     topPadding + (kToolbarHeight - avatarSize) / 2,
                     t,
@@ -390,7 +386,7 @@ class _UserDetailPageState extends State<UserDetailPage>
                   const avatarLeftCollapsed = 56.0;
 
                   final avatarLeftRaw =
-                  lerpDouble(avatarLeftExpanded, avatarLeftCollapsed, t)!;
+                  ui.lerpDouble(avatarLeftExpanded, avatarLeftCollapsed, t)!;
 
                   final maxAvatarLeft = panelW - avatarSize - 8.0;
                   final avatarLeft = avatarLeftRaw.clamp(
@@ -462,19 +458,15 @@ class _UserDetailPageState extends State<UserDetailPage>
                               .clamp(0.0, 1.0);
                           final u = Curves.easeInOutCubic.transform(uRaw);
 
-                          final nick = (_userValues['nickname'] ??
-                              _userValues['nickName'] ??
-                              _userValues['Nickname'] ??
-                              '')
-                              .toString()
-                              .trim();
+                          final nick = (_userValues['nickname'] ?? '').toString().trim();
+
 
                           final mail = ((_userValues['email'] ?? '').toString().isNotEmpty
                               ? (_userValues['email'] ?? '').toString()
                               : (_auth.currentUser?.email ?? '').toString())
                               .trim();
 
-                          final nameFs = lerpDouble(20, 16, u)!;
+                          final nameFs = ui.lerpDouble(20, 16, u)!;
                           final textColor =
                           Color.lerp(Colors.black87, Colors.white, u)!;
 
@@ -491,11 +483,11 @@ class _UserDetailPageState extends State<UserDetailPage>
                             (wScreen - expandedW - 16.0).clamp(16.0, wScreen),
                           );
 
-                          final wwRaw = lerpDouble(expandedW, collapsedW, u)!;
+                          final wwRaw = ui.lerpDouble(expandedW, collapsedW, u)!;
                           final maxW = (wScreen - 16.0);
                           final ww = wwRaw.clamp(0.0, maxW < 0 ? 0.0 : maxW);
 
-                          final xRaw = lerpDouble(xExpanded, collapsedX, u)!;
+                          final xRaw = ui.lerpDouble(xExpanded, collapsedX, u)!;
                           final maxX = wScreen - ww - 8.0;
                           final x = xRaw.clamp(
                             8.0,
@@ -505,7 +497,7 @@ class _UserDetailPageState extends State<UserDetailPage>
                           const extraDown = 18.0;
                           final yExpanded = avatarTop + avatarSize + extraDown;
                           final yCollapsed = avatarTop + (avatarSize - 20) / 2;
-                          final y = lerpDouble(yExpanded, yCollapsed, u)!;
+                          final y = ui.lerpDouble(yExpanded, yCollapsed, u)!;
 
                           final subOpacity = Curves.easeOutQuad
                               .transform((1.0 - uRaw).clamp(0.0, 1.0));
@@ -812,16 +804,23 @@ class _UserDetailPageState extends State<UserDetailPage>
 
 
 
+// ⚠️ ARCHITETTURA:
+// - Il client NON scrive MAI direttamente su Firestore
+// - Tutti i salvataggi profilo passano da Cloud Functions
+// - NON usare updateMyGlobalProfileAndSync / updateGlobalProfileAndSync
   Future<void> _persistField(
       bool isUserTarget,
       String key,
       dynamic value,
       ) async {
-    if (!isUserTarget) return;
+    if (!isUserTarget) {
+      throw StateError(
+        'Tentativo di scrittura MEMBER bloccato: solo Cloud Functions possono farlo',
+      );
+    }
 
-    final callable = FirebaseFunctions.instance.httpsCallable(
-      'updateUserProfileField', // ⬅️ nome function
-    );
+    final callable = FirebaseFunctions.instance
+        .httpsCallable('updateUserProfileField');
 
     try {
       await callable.call(<String, dynamic>{
@@ -836,6 +835,7 @@ class _UserDetailPageState extends State<UserDetailPage>
       }
     }
   }
+
 
 
 
@@ -860,21 +860,23 @@ class _UserDetailPageState extends State<UserDetailPage>
   // IMAGE UPLOAD
   // ------------------------------------------------------------
   Future<void> _pickAndUploadImage({required bool isCover}) async {
+    final BuildContext ctx = context;
+
     try {
       final source = await showModalBottomSheet<ImageSource>(
-        context: context,
+        context: ctx,
         builder: (_) => SafeArea(
           child: Wrap(
             children: [
               ListTile(
                 leading: const Icon(Icons.photo_camera),
                 title: const Text('Fotocamera'),
-                onTap: () => Navigator.pop(context, ImageSource.camera),
+                onTap: () => Navigator.pop(ctx, ImageSource.camera),
               ),
               ListTile(
                 leading: const Icon(Icons.photo_library),
                 title: const Text('Galleria'),
-                onTap: () => Navigator.pop(context, ImageSource.gallery),
+                onTap: () => Navigator.pop(ctx, ImageSource.gallery),
               ),
             ],
           ),
@@ -899,25 +901,21 @@ class _UserDetailPageState extends State<UserDetailPage>
       await ref.putData(jpeg, SettableMetadata(contentType: 'image/jpeg'));
       final url = await ref.getDownloadURL();
 
-
-      final callable = FirebaseFunctions.instance
-          .httpsCallable('setUserPublicImage');
-
-      await callable.call({
-        'field': isCover ? 'cover' : 'photo',
-        'url': url,
+      await FirebaseFunctions.instance.httpsCallable('updateUserProfileField').call({
+        'fieldKey': isCover ? 'coverUrl' : 'photoUrl',
+        'value': url,
       });
 
-
-
+      if (!mounted) return;
       setState(() {
         _userValues[isCover ? 'coverUrl' : 'photoUrl'] = url;
       });
-
     } finally {
       if (mounted) setState(() => _savingImage = false);
     }
   }
+
+
 }
 
 Uint8List _compressToJpeg(Uint8List input) {

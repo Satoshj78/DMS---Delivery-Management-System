@@ -80,69 +80,36 @@ service cloud.firestore {
     }
 
     // =====================================================
-    // USERS (PRIVATO)
-    // =====================================================
-    match /Users/{userId} {
+// USERS (PRIVATO) — SOLO SERVER
+// =====================================================
+match /Users/{userId} {
 
-      function activeId(d) {
-        return d.activeLeagueId != null ? d.activeLeagueId : "";
-      }
+  allow read: if signedIn() && uid() == userId;
 
-      function validActiveLeagueChange() {
-        return activeId(request.resource.data) == activeId(resource.data)
-          || activeId(request.resource.data) == ""
-          || exists(memberPath(activeId(request.resource.data), uid()));
-      }
+  // ❌ il client NON può più scrivere nulla
+  allow create, update, delete: if false;
 
-      function nicknameLocked() {
-        return (!('nickname' in request.resource.data)
-                || request.resource.data.nickname == resource.data.nickname)
-            && (!('nicknameLower' in request.resource.data)
-                || request.resource.data.nicknameLower == resource.data.nicknameLower);
-      }
+  match /sharedTo/{viewerUid} {
+    allow read: if signedIn() && (uid() == userId || uid() == viewerUid);
+    allow write: if false;
+  }
 
-      function onlyAllowedTopLevelKeysChanged() {
-        return request.resource.data.diff(resource.data).changedKeys()
-          .hasOnly(["profile", "activeLeagueId", "updatedAt", "leagueIds"]);
-      }
+  match /sharedToEmails/{emailLower} {
+    allow read: if signedIn() && (uid() == userId || myEmailLower() == emailLower);
+    allow write: if false;
+  }
 
-      function validProfileShape() {
-        return !(request.resource.data.profile is map)
-          || request.resource.data.profile.keys().hasOnly(["custom", "privacy"]);
-      }
+  match /sharedToLeagues/{leagueId} {
+    allow read: if signedIn() && (uid() == userId || exists(memberPath(leagueId, uid())));
+    allow write: if false;
+  }
 
-      allow read: if signedIn() && uid() == userId;
-      allow create: if signedIn() && uid() == userId;
+  match /fcmTokens/{tokenId} {
+    allow read: if false;
+    allow write: if signedIn() && uid() == userId;
+  }
+}
 
-      allow update: if signedIn()
-        && uid() == userId
-        && validActiveLeagueChange()
-        && nicknameLocked()
-        && onlyAllowedTopLevelKeysChanged()
-        && validProfileShape();
-
-      allow delete: if signedIn() && uid() == userId;
-
-      match /sharedTo/{viewerUid} {
-        allow read: if signedIn() && (uid() == userId || uid() == viewerUid);
-        allow write: if signedIn() && uid() == userId;
-      }
-
-      match /sharedToEmails/{emailLower} {
-        allow read: if signedIn() && (uid() == userId || myEmailLower() == emailLower);
-        allow write: if signedIn() && uid() == userId;
-      }
-
-      match /sharedToLeagues/{leagueId} {
-        allow read: if signedIn() && (uid() == userId || exists(memberPath(leagueId, uid())));
-        allow write: if signedIn() && uid() == userId;
-      }
-
-      match /fcmTokens/{tokenId} {
-        allow create, update, delete: if signedIn() && uid() == userId;
-        allow read: if false;
-      }
-    }
 
     // =====================================================
     // USERSPUBLIC — SOLO READ

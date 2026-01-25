@@ -195,6 +195,92 @@ const SENSITIVE_FIELDS = new Set<string>([
 ]);
 
 
+
+
+// =====================================================
+// ✅ UPDATE MY PROFILE (SERVER-DRIVEN)
+// =====================================================
+export const updateMyProfile = onCall({ region: REGION }, async (req) => {
+  const uid = requireAuth(req);
+
+  const fields = req.data?.fields ?? {};
+  const privacyPatch = req.data?.privacy ?? {};
+
+  if (typeof fields !== "object" || fields === null || Array.isArray(fields)) {
+    throw new HttpsError("invalid-argument", "fields non valido");
+  }
+  if (typeof privacyPatch !== "object" || privacyPatch === null || Array.isArray(privacyPatch)) {
+    throw new HttpsError("invalid-argument", "privacy non valido");
+  }
+
+  const userRef = db.collection("Users").doc(uid);
+  const snap = await userRef.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Utente non trovato");
+
+  const prev = (snap.data() ?? {}) as Record<string, any>;
+  const prevProfile = (prev.profile ?? {}) as Record<string, any>;
+  const prevCustom = (prevProfile.custom ?? {}) as Record<string, any>;
+  const prevPrivacy = (prevProfile.privacy ?? {}) as Record<string, any>;
+
+  // ✅ MERGE custom (non perdere campi non inviati)
+  const nextCustom: Record<string, any> = { ...prevCustom };
+  for (const [k, v] of Object.entries(fields)) nextCustom[k] = v;
+
+  // ✅ MERGE privacy (non perdere campi non inviati)
+  const nextPrivacy: Record<string, any> = { ...prevPrivacy, ...privacyPatch };
+
+  await userRef.set(
+    {
+      profile: {
+        custom: nextCustom,
+        privacy: nextPrivacy,
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+
+  return { ok: true };
+});
+
+
+
+
+
+
+
+export const updateUserProfileField = onCall({ region: REGION }, async (req) => {
+  const uid = requireAuth(req);
+  const fieldKey = (req.data?.fieldKey ?? "").toString().trim();
+  const value = req.data?.value;
+
+  if (!fieldKey) throw new HttpsError("invalid-argument", "fieldKey mancante");
+
+  const userRef = db.collection("Users").doc(uid);
+  const snap = await userRef.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Utente non trovato");
+
+  // ✅ write SOLO dentro profile.custom
+  await userRef.set(
+    {
+      profile: {
+        custom: {
+          [fieldKey]: value,
+        },
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+
+  return { ok: true };
+});
+
+
+
+
+
+
 // ------------------------
 // HELPERS
 // ------------------------
@@ -241,16 +327,18 @@ function resolvePublicFromUserDoc(
   fallback?: { email?: string; emailLower?: string }
 ) {
   const profile = (u?.profile ?? {}) as Record<string, any>;
+  const custom = (profile?.custom ?? {}) as Record<string, any>;
 
-  const nome = (u?.nome ?? profile.nome ?? "").toString().trim();
-  const cognome = (u?.cognome ?? profile.cognome ?? "").toString().trim();
-  const nickname = (u?.nickname ?? profile.nickname ?? "").toString().trim();
+  // ✅ Priorità: profile.custom -> profile.* -> top-level legacy
+  const nome = (custom?.nome ?? profile?.nome ?? u?.nome ?? "").toString().trim();
+  const cognome = (custom?.cognome ?? profile?.cognome ?? u?.cognome ?? "").toString().trim();
+  const nickname = (custom?.nickname ?? profile?.nickname ?? u?.nickname ?? "").toString().trim();
 
-  const photoUrl = (u?.photoUrl ?? profile.photoUrl ?? "").toString().trim();
-  const photoV = asInt(u?.photoV ?? profile.photoV ?? 0);
+  const photoUrl = (custom?.photoUrl ?? profile?.photoUrl ?? u?.photoUrl ?? "").toString().trim();
+  const photoV = asInt(custom?.photoV ?? profile?.photoV ?? u?.photoV ?? 0);
 
-  const coverUrl = (u?.coverUrl ?? profile.coverUrl ?? "").toString().trim();
-  const coverV = asInt(u?.coverV ?? profile.coverV ?? 0);
+  const coverUrl = (custom?.coverUrl ?? profile?.coverUrl ?? u?.coverUrl ?? "").toString().trim();
+  const coverV = asInt(custom?.coverV ?? profile?.coverV ?? u?.coverV ?? 0);
 
   const email = (u?.email ?? fallback?.email ?? "").toString().trim();
   const emailLower = (
@@ -272,6 +360,7 @@ function resolvePublicFromUserDoc(
     emailLower,
   };
 }
+
 
 async function getLeaguePublicProfile(
   uid: string,
@@ -373,16 +462,20 @@ export const onUserProfileWrite = onDocumentWritten(
     // 🔎 MODE RESOLVER
     // ----------------------------
     function getMode(fieldKey: string): string {
-      // sempre pubblici
-      if (ALWAYS_PUBLIC_FIELDS.has(fieldKey)) return "public";
+  // fieldKey può essere: "nome" oppure "custom.nome"
+  const rawKey = fieldKey.startsWith("custom.") ? fieldKey.substring("custom.".length) : fieldKey;
 
-      const p = privacy[fieldKey] ?? {};
-      const mode = (p.mode ?? "").toString().toLowerCase();
+  // ✅ sempre pubblici (chiave raw)
+  if (ALWAYS_PUBLIC_FIELDS.has(rawKey)) return "public";
 
-      if (mode) return mode;
-      if (SENSITIVE_FIELDS.has(fieldKey)) return "private";
-      return "private";
-    }
+  const p = privacy[rawKey] ?? privacy[fieldKey] ?? {};
+  const mode = (p.mode ?? "").toString().toLowerCase();
+
+  if (mode) return mode;
+  if (SENSITIVE_FIELDS.has(rawKey)) return "private";
+  return "private";
+}
+
 
     // ----------------------------
     // 🎯 FILTRI

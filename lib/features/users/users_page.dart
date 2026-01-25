@@ -6,6 +6,7 @@
 import 'dart:async';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:dms_app/features/users/users_detail_public_page.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -500,16 +501,22 @@ class _UsersPageState extends State<UsersPage> {
                                 },
                               ),
                               onTap: () async {
-                                if (!inLeague) return;
-
                                 Navigator.of(ctx).pop();
 
-                                // Se è membro della lega, apro/seleleziono
-                                if (widget.embedded && isDesktop && widget.onSelectUser != null) {
-                                  widget.onSelectUser!(uid);
+                                final inLeague = _memberUidSet.contains(uid);
+
+                                if (!inLeague) {
+                                  // 🔓 FUORI LEGA → PROFILO PUBBLICO
+                                  Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) => UsersDetailPublicPage(userId: uid),
+                                    ),
+                                  );
                                   return;
                                 }
 
+                                // ✅ MEMBRO DELLA LEGA → DETAIL COMPLETA
                                 Navigator.push(
                                   context,
                                   MaterialPageRoute(
@@ -520,6 +527,7 @@ class _UsersPageState extends State<UsersPage> {
                                   ),
                                 );
                               },
+
                             ),
                           );
                         },
