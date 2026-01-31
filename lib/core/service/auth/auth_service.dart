@@ -189,31 +189,17 @@ class AuthService {
   }
 
   Future<void> signOut({bool clearActiveLeague = true}) async {
-    final uid = _auth.currentUser?.uid;
-
-    if (clearActiveLeague && uid != null) {
-      await _db.collection('Users').doc(uid).set(
-        {'activeLeagueId': null, 'updatedAt': FieldValue.serverTimestamp()},
-        SetOptions(merge: true),
-      );
-    }
+    // ❌ NON toccare Users dal client
 
     if (!kIsWeb) {
       try {
         await GoogleSignIn.instance.signOut();
       } catch (_) {}
-
-      // PER ABILITARE FACEBOOK TOGLIU IL COMMENTO
-/*
-      try {
-        await FacebookAuth.instance.logOut();
-      } catch (_) {}
-
-*/
     }
 
     await _auth.signOut();
   }
+
 
 
 

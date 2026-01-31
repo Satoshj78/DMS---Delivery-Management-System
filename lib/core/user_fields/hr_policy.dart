@@ -71,8 +71,9 @@ class HrFieldPolicy {
     );
   }
 
+  /// ✅ Salva in "mode" (non più "visibility")
   Map<String, dynamic> toMap() => {
-    'visibility': visibility.name,
+    'mode': visibility.name,
     'areas': areas,
     'branches': branches,
     'roles': roles,
@@ -90,12 +91,13 @@ class HrFieldPolicy {
 
   static HrFieldPolicy fromMap(dynamic raw, {HrFieldPolicy? fallback}) {
     if (raw is! Map) return fallback ?? HrFieldPolicy.defaultForNonSensitive();
-    String s(dynamic v) => (v ?? '').toString();
-    List<String> ls(dynamic v) =>
-        (v is List) ? v.map((e) => e.toString()).toList() : <String>[];
 
+    String s(dynamic v) => (v ?? '').toString();
+    List<String> ls(dynamic v) => (v is List) ? v.map((e) => e.toString()).toList() : <String>[];
+
+    // ✅ Legge prima "mode", se manca accetta anche il vecchio "visibility"
     HrVisibilityScope vis = HrVisibilityScope.publicLeague;
-    final visStr = s(raw['visibility']);
+    final visStr = s(raw['mode']).isNotEmpty ? s(raw['mode']) : s(raw['visibility']);
     for (final e in HrVisibilityScope.values) {
       if (e.name == visStr) vis = e;
     }

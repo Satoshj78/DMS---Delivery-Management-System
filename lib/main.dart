@@ -7,6 +7,10 @@ import 'package:flutter/services.dart';
 
 import 'firebase_options.dart';
 import 'core/routing/root_gate.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+
+
 
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
@@ -17,6 +21,13 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+
+
+// 🔥 DEBUG: disabilita cache Firestore per stacktrace reale
+  FirebaseFirestore.instance.settings = const Settings(
+    persistenceEnabled: false,
+  );
+
 
   // ✅ App Check (fondamentale se hai enforcement su Storage/Firestore)
   await FirebaseAppCheck.instance.activate(
@@ -39,6 +50,7 @@ Future<void> main() async {
     SystemUiMode.manual,
     overlays: SystemUiOverlay.values, // top + bottom
   );
+
 
 
 

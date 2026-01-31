@@ -661,7 +661,12 @@ class _UsersPageState extends State<UsersPage> {
                         .collection('Leagues')
                         .doc(widget.leagueId);
 
-                    final membersStream = leagueRef.collection('members').snapshots();
+                    final membersStream = leagueRef
+                        .collection('members')
+                        .orderBy('displayCognomeLower')
+                        .orderBy('displayNomeLower')
+                        .snapshots();
+
 
                     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                       stream: membersStream,
@@ -882,8 +887,13 @@ class _UsersPageState extends State<UsersPage> {
         .snapshots()
         .listen((snap) {
       final d = snap.data() ?? {};
-      final url = _s(d['photoUrl']);
-      final v = _asInt(d['photoV']);
+      final profile = (d['profile'] is Map)
+          ? Map<String, dynamic>.from(d['profile'])
+          : <String, dynamic>{};
+
+      // ✅ prende prima da profile.*, fallback su root
+      final url = _s(profile['photoUrl'] ?? d['photoUrl']);
+      final v = _asInt(profile['photoV'] ?? d['photoV']);
 
       if (!mounted) return;
       if (url == _selfUserPhotoUrl && v == _selfUserPhotoV) return;
@@ -894,6 +904,7 @@ class _UsersPageState extends State<UsersPage> {
       });
     });
   }
+
 
   DocumentReference<Map<String, dynamic>> _memberRef(String uid) {
     return FirebaseFirestore.instance

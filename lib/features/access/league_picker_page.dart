@@ -22,13 +22,7 @@ class LeaguePickerPage extends StatefulWidget {
   State<LeaguePickerPage> createState() => _LeaguePickerPageState();
 }
 
-class _InviteRec {
-  final String leagueId;
-  final String inviteId;
-  final String? roleId;
 
-  _InviteRec({required this.leagueId, required this.inviteId, this.roleId});
-}
 
 class _LeagueCardItem {
   final String leagueId;
@@ -84,12 +78,8 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
 
   bool _creating = false;
 
-  // ---- refresh trigger
-  int _refreshTick = 0;
 
   // ---- memo future (evita “1 secondo di loading” quando fai setState per espandere)
-  Future<Map<String, List<_LeagueCardItem>>>? _listsFuture;
-  String _listsFutureKey = '';
 
   @override
   void initState() {
@@ -152,158 +142,8 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
   }
 
 
-  // ---------- LEAGUES GET BY ID (no query) ----------
-  Future<List<_LeagueCardItem>> _fetchJoinedLeagueItems({
-    required List<String> leagueIds,
-    required String activeLeagueId,
-  }) async {
-    if (leagueIds.isEmpty) return [];
-
-    final col = _db.collection('Leagues');
-    final items = <_LeagueCardItem>[];
-
-    const chunkSize = 10;
-    for (var i = 0; i < leagueIds.length; i += chunkSize) {
-      final chunk = leagueIds.sublist(i, (i + chunkSize).clamp(0, leagueIds.length));
-      final snaps = await Future.wait(chunk.map((id) => col.doc(id).get()));
-
-      for (final snap in snaps) {
-        if (!snap.exists) continue;
-        final d = snap.data() ?? {};
-
-        items.add(_LeagueCardItem(
-          leagueId: snap.id,
-          nome: (d['nome'] ?? 'League').toString(),
-          joinCode: (d['joinCode'] ?? '').toString(),
-          logoUrl: (d['logoUrl'] ?? '').toString(),
-          invited: false,
-        ));
-      }
-    }
-
-    // attiva in alto, poi alfabetico
-    items.sort((a, b) {
-      final aActive = a.leagueId == activeLeagueId;
-      final bActive = b.leagueId == activeLeagueId;
-      if (aActive && !bActive) return -1;
-      if (bActive && !aActive) return 1;
-      return a.nome.toLowerCase().compareTo(b.nome.toLowerCase());
-    });
-
-    return items;
-  }
 
 
-  // ---------- INVITES ----------
-  Future<List<_InviteRec>> _fetchInvitesForEmailLower(String emailLower) async {
-    final out = <_InviteRec>[];
-    final seen = <String>{};
-
-    Future<void> runQuery(String field) async {
-      try {
-        final qs = await _db.collectionGroup('invites').where(field, isEqualTo: emailLower).get();
-        for (final doc in qs.docs) {
-          final data = doc.data();
-          final status = (data['status'] ?? 'pending').toString().toLowerCase().trim();
-          if (status == 'revoked' || status == 'deleted') continue;
-
-          final leagueRef = doc.reference.parent.parent;
-          if (leagueRef == null) continue;
-
-          final leagueId = leagueRef.id;
-          final inviteId = doc.id;
-          final key = '$leagueId/$inviteId';
-          if (seen.contains(key)) continue;
-          seen.add(key);
-
-          out.add(_InviteRec(
-            leagueId: leagueId,
-            inviteId: inviteId,
-            roleId: data['roleId']?.toString(),
-          ));
-        }
-      } catch (_) {
-        // se regole/field non consentono, non rompo UI
-      }
-    }
-
-    await runQuery('emailLower');
-    await runQuery('toEmailLower');
-    await runQuery('invitedEmailLower');
-
-    return out;
-  }
-
-  Future<Map<String, List<_LeagueCardItem>>> _loadLeagueLists({
-    required List<String> joinedLeagueIds, // (non usato, lo lasciamo per compat)
-    required String emailLower,            // (non usato, lo lasciamo per compat)
-    required String activeLeagueId,
-  }) async {
-    final res = await _api.listLeaguesForUser();
-
-
-
-    final joinedRaw = (res['joined'] is List) ? (res['joined'] as List) : [];
-    final invitedRaw = (res['invited'] is List) ? (res['invited'] as List) : [];
-
-    final joined = joinedRaw.map((e) {
-      final m = Map<String, dynamic>.from(e as Map);
-      return _LeagueCardItem(
-        leagueId: (m['leagueId'] ?? '').toString(),
-        nome: (m['nome'] ?? 'League').toString(),
-        joinCode: (m['joinCode'] ?? '').toString(),
-        logoUrl: (m['logoUrl'] ?? '').toString(),
-        invited: false,
-      );
-    }).toList();
-
-    final invited = invitedRaw.map((e) {
-      final m = Map<String, dynamic>.from(e as Map);
-      return _LeagueCardItem(
-        leagueId: (m['leagueId'] ?? '').toString(),
-        nome: (m['nome'] ?? 'Lega').toString(),
-        joinCode: '',
-        logoUrl: (m['logoUrl'] ?? '').toString(),
-        invited: true,
-        inviteId: (m['inviteId'] ?? '').toString(),
-        roleId: (m['roleId'] ?? '').toString().isEmpty ? null : (m['roleId'] ?? '').toString(),
-      );
-    }).toList();
-
-    joined.sort((a, b) {
-      final aActive = a.leagueId == activeLeagueId;
-      final bActive = b.leagueId == activeLeagueId;
-      if (aActive && !bActive) return -1;
-      if (bActive && !aActive) return 1;
-      return a.nome.toLowerCase().compareTo(b.nome.toLowerCase());
-    });
-
-    invited.sort((a, b) => a.nome.toLowerCase().compareTo(b.nome.toLowerCase()));
-
-    return {'joined': joined, 'invited': invited};
-  }
-
-
-
-
-  Future<Map<String, List<_LeagueCardItem>>> _getListsFuture({
-    required List<String> joinedLeagueIds,
-    required String emailLower,
-    required String activeLeagueId,
-  }) {
-    final sorted = [...joinedLeagueIds]..sort();
-    final key = '${sorted.join(",")}::$emailLower::$activeLeagueId::$_refreshTick';
-
-    if (_listsFuture == null || _listsFutureKey != key) {
-      _listsFutureKey = key;
-      _listsFuture = _loadLeagueLists(
-        joinedLeagueIds: sorted,
-        emailLower: emailLower,
-        activeLeagueId: activeLeagueId,
-      );
-    }
-    return _listsFuture!;
-  }
 
   String _labelOf(String key) {
     switch (key) {
@@ -367,7 +207,6 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
         _toast('Sei già membro di questa lega.');
         if (leagueId.isNotEmpty) {
           await _openLeague(leagueId);
-          setState(() => _refreshTick++);
         }
       } else if (alreadyRequested) {
         _toast('Richiesta già inviata. Attendi approvazione.');
@@ -436,7 +275,6 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
       if (mounted) {
         setState(() {
           _inviteExpanded = false;
-          _refreshTick++;
         });
       }
       _toast('Invito accettato!');
@@ -463,7 +301,6 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
     } catch (e) {
       _toast('Errore accettazione invito: $e');
     } finally {
-      setState(() => _refreshTick++);
     }
   }
 
@@ -597,9 +434,21 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
       return;
     }
 
+
+
+
+
     setState(() => _creating = true);
     try {
-      // ✅ 1) creo la lega via callable (la function crea members + aggiorna Users)
+
+      // ✅ 0) PRIMA: scrivo Nome/Cognome su Users/{uid} (self)
+      // cosi' la Cloud Function onUserProfileWrite propaga tutto (UsersPublic + members)
+      await UserService.bootstrapMyNameOnUsers(
+        nome: nomeCreatore,
+        cognome: cognomeCreatore,
+      );
+
+      // ✅ 1) poi creo la lega via callable
       final res = await _api.createLeague(
         nome: nomeLega,
         logoBytes: _logoBytes,
@@ -625,7 +474,6 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
       if (mounted) {
         setState(() {
           _logoBytes = null;
-          _refreshTick++;
         });
       }
     } catch (e) {
@@ -975,7 +823,6 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
       return const Scaffold(body: Center(child: Text('Utente non loggato')));
     }
 
-    final userRef = _db.collection('Users').doc(u.uid);
 
     return DefaultTabController(
       length: 2,
@@ -995,11 +842,7 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
               icon: const Icon(Icons.tune),
               onPressed: _openPrefsDialog,
             ),
-            IconButton(
-              tooltip: 'Aggiorna',
-              icon: const Icon(Icons.refresh),
-              onPressed: () => setState(() => _refreshTick++),
-            ),
+
             IconButton(
               tooltip: 'Logout',
               icon: const Icon(Icons.logout),
@@ -1016,95 +859,99 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
         body: TabBarView(
           children: [
             // ---------------- TAB 1: LE TUE LEGHE ----------------
-            StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-              stream: userRef.snapshots(),
-              builder: (context, userSnap) {
-                if (userSnap.hasError) return const Center(child: Text('Errore nel caricamento utente'));
-                if (!userSnap.hasData) return const Center(child: CircularProgressIndicator());
+            FutureBuilder<Map<String, dynamic>>(
+              future: _api.listLeaguesForUser(),
+              builder: (context, snap) {
+                if (snap.hasError) {
+                  return Center(child: Text('Errore: ${snap.error}'));
+                }
+                if (!snap.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
 
-                final data = userSnap.data!.data() ?? {};
-                final activeLeagueId = (data['activeLeagueId'] is String) ? (data['activeLeagueId'] as String).trim() : '';
+                final res = snap.data!;
+                final activeLeagueId = (res['activeLeagueId'] ?? '').toString();
 
-                final leagueIdsRaw = (data['leagueIds'] is List) ? data['leagueIds'] as List : [];
-                final leagueIds = leagueIdsRaw.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList();
+                final joined = (res['joined'] as List? ?? [])
+                    .map((e) => _LeagueCardItem(
+                  leagueId: (e['leagueId'] ?? '').toString(),
+                  nome: (e['nome'] ?? 'League').toString(),
+                  joinCode: (e['joinCode'] ?? '').toString(),
+                  logoUrl: (e['logoUrl'] ?? '').toString(),
+                  invited: false,
+                ))
+                    .toList();
 
-                final emailLower = ((u.email ?? '').toLowerCase()).trim();
+                final invited = (res['invited'] as List? ?? [])
+                    .map((e) => _LeagueCardItem(
+                  leagueId: (e['leagueId'] ?? '').toString(),
+                  nome: (e['nome'] ?? 'Lega').toString(),
+                  joinCode: '',
+                  logoUrl: (e['logoUrl'] ?? '').toString(),
+                  invited: true,
+                  inviteId: (e['inviteId'] ?? '').toString(),
+                  roleId: (e['roleId'] ?? '').toString().isEmpty ? null : (e['roleId'] ?? '').toString(),
+                ))
+                    .toList();
 
-                return FutureBuilder<Map<String, List<_LeagueCardItem>>>(
-                  future: _getListsFuture(
-                    joinedLeagueIds: leagueIds,
-                    emailLower: emailLower,
-                    activeLeagueId: activeLeagueId,
-                  ),
-                  builder: (context, snap) {
-                    if (snap.hasError) {
-                      return Center(child: Text('Errore: ${snap.error}'));
-                    }
+                final totalAll = joined.length + invited.length;
 
-                    final waiting = snap.connectionState == ConnectionState.waiting;
-                    final joined = snap.data?['joined'] ?? <_LeagueCardItem>[];
-                    final invited = snap.data?['invited'] ?? <_LeagueCardItem>[];
-                    final totalAll = joined.length + invited.length;
-
-                    return Column(
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
-                          child: _buildJoinExpansion(),
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
-                          child: _buildInviteExpansion(),
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(14, 6, 14, 8),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  'Le tue leghe ($totalAll)',
-                                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
-                                ),
-                              ),
-                            ],
+                return Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
+                      child: _buildJoinExpansion(),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+                      child: _buildInviteExpansion(),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(14, 6, 14, 8),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              'Le tue leghe ($totalAll)',
+                              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+                            ),
                           ),
-                        ),
+                        ],
+                      ),
+                    ),
 
-                        // SOTTOTAB sotto “Le tue leghe”
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10),
-                          child: TabBar(
-                            controller: _subTabController,
-                            tabs: _tabOrder.map((k) => Tab(text: _labelOf(k))).toList(),
-                          ),
-                        ),
-                        const Divider(height: 1),
+                    // SOTTOTAB
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      child: TabBar(
+                        controller: _subTabController,
+                        tabs: _tabOrder.map((k) => Tab(text: _labelOf(k))).toList(),
+                      ),
+                    ),
+                    const Divider(height: 1),
 
-                        Expanded(
-                          child: waiting
-                              ? const Center(child: CircularProgressIndicator())
-                              : TabBarView(
-                            controller: _subTabController,
-                            children: _tabOrder.map((k) {
-                              final items = _itemsForTab(k, joined, invited);
-                              if (items.isEmpty) {
-                                return Center(child: Text('Nessuna lega in "${_labelOf(k)}"'));
-                              }
-                              return ListView.separated(
-                                padding: const EdgeInsets.all(14),
-                                itemCount: items.length,
-                                separatorBuilder: (_, __) => const SizedBox(height: 10),
-                                itemBuilder: (context, i) => _buildLeagueTile(items[i], activeLeagueId),
-                              );
-                            }).toList(),
-                          ),
-                        ),
-                      ],
-                    );
-                  },
+                    Expanded(
+                      child: TabBarView(
+                        controller: _subTabController,
+                        children: _tabOrder.map((k) {
+                          final items = _itemsForTab(k, joined, invited);
+                          if (items.isEmpty) {
+                            return Center(child: Text('Nessuna lega in "${_labelOf(k)}"'));
+                          }
+                          return ListView.separated(
+                            padding: const EdgeInsets.all(14),
+                            itemCount: items.length,
+                            separatorBuilder: (_, __) => const SizedBox(height: 10),
+                            itemBuilder: (context, i) => _buildLeagueTile(items[i], activeLeagueId),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                  ],
                 );
               },
             ),
+
 
             // ---------------- TAB 2: CREA NUOVA LEGA ----------------
             _buildCreateTab(),
@@ -1113,4 +960,6 @@ class _LeaguePickerPageState extends State<LeaguePickerPage> with TickerProvider
       ),
     );
   }
+
+
 }

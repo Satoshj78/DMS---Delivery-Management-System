@@ -2,11 +2,16 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // -----------------------
+    // =====================
     // HELPERS
-    // -----------------------
-    function signedIn() { return request.auth != null; }
-    function uid() { return request.auth.uid; }
+    // =====================
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function uid() {
+      return request.auth.uid;
+    }
 
     function myEmailLower() {
       return signedIn() && request.auth.token.email != null
@@ -26,26 +31,19 @@ service cloud.firestore {
       return /databases/$(database)/documents/Leagues/$(leagueId)/roles/$(roleId);
     }
 
-    function userPath(userId) {
-      return /databases/$(database)/documents/Users/$(userId);
-    }
-
     function isMember(leagueId) {
       return signedIn() && exists(memberPath(leagueId, uid()));
     }
 
     function isCreator(leagueId) {
-      return signedIn() && get(leaguePath(leagueId)).data.createdByUid == uid();
-    }
-
-    function myMemberData(leagueId) {
-      return get(memberPath(leagueId, uid())).data;
+      return signedIn()
+        && exists(leaguePath(leagueId))
+        && get(leaguePath(leagueId)).data.createdByUid == uid();
     }
 
     function myRoleId(leagueId) {
       return isMember(leagueId)
-        && myMemberData(leagueId).roleId != null
-        ? myMemberData(leagueId).roleId
+        ? get(memberPath(leagueId, uid())).data.roleId
         : "";
     }
 
@@ -53,7 +51,6 @@ service cloud.firestore {
       return isMember(leagueId)
         && myRoleId(leagueId) != ""
         && exists(rolePath(leagueId, myRoleId(leagueId)))
-        && (get(rolePath(leagueId, myRoleId(leagueId))).data.permissions is map)
         && get(rolePath(leagueId, myRoleId(leagueId))).data.permissions[permKey] == true;
     }
 
@@ -73,52 +70,41 @@ service cloud.firestore {
       return isCreator(leagueId) || hasRolePerm(leagueId, "members_sensitive_read");
     }
 
-    function myCompartoLower(leagueId) {
-      return isMember(leagueId) && myMemberData(leagueId).compartoLower != null
-        ? myMemberData(leagueId).compartoLower
-        : "";
+    // =====================================================
+    // USERS — PROFILO PERSONALE (SELF WRITE)
+    // =====================================================
+    match /Users/{userId} {
+
+      // ✅ self legge tutto
+      allow read: if signedIn() && uid() == userId;
+
+      // ✅ self può scrivere TUTTA la sua anagrafica personale
+      // (HR, foto, cover, privacy, custom, ecc.)
+      allow create, update: if signedIn() && uid() == userId;
+
+      // ❌ nessuno può cancellare Users
+      allow delete: if false;
+
+      // -------- FCM TOKENS --------
+      match /fcmTokens/{tokenId} {
+        allow write: if signedIn() && uid() == userId;
+        allow read: if false;
+      }
+
+      // -------- BLOCCA SUBCOLLECTIONS NON PREVISTE --------
+      match /{sub=**} {
+        allow read, write: if false;
+      }
     }
 
     // =====================================================
-// USERS (PRIVATO) — SOLO SERVER
-// =====================================================
-match /Users/{userId} {
-
-  allow read: if signedIn() && uid() == userId;
-
-  // ❌ il client NON può più scrivere nulla
-  allow create, update, delete: if false;
-
-  match /sharedTo/{viewerUid} {
-    allow read: if signedIn() && (uid() == userId || uid() == viewerUid);
-    allow write: if false;
-  }
-
-  match /sharedToEmails/{emailLower} {
-    allow read: if signedIn() && (uid() == userId || myEmailLower() == emailLower);
-    allow write: if false;
-  }
-
-  match /sharedToLeagues/{leagueId} {
-    allow read: if signedIn() && (uid() == userId || exists(memberPath(leagueId, uid())));
-    allow write: if false;
-  }
-
-  match /fcmTokens/{tokenId} {
-    allow read: if false;
-    allow write: if signedIn() && uid() == userId;
-  }
-}
-
-
-    // =====================================================
-    // USERSPUBLIC — SOLO READ
+    // USERSPUBLIC — READ ONLY (SERVER DRIVEN)
     // =====================================================
     match /UsersPublic/{userId} {
       allow read: if signedIn();
       allow write: if false;
 
-      match /{document=**} {
+      match /{sub=**} {
         allow read, write: if false;
       }
     }
@@ -135,114 +121,76 @@ match /Users/{userId} {
     // =====================================================
     match /Leagues/{leagueId} {
 
+      // ✅ chiunque autenticato può creare una lega
+      allow create: if signedIn();
+
+      // ✅ leggono solo membri o creatore
       allow read: if signedIn() && (isMember(leagueId) || isCreator(leagueId));
-      allow create, update, delete: if false;
 
-      // MEMBERS — SOLO FUNCTION
+      // ❌ update / delete SOLO backend
+      allow update, delete: if false;
+
+      // ---------------- MEMBERS ----------------
       match /members/{memberUid} {
+  // 👇 I membri normali NON leggono i doc userDeleted
+  allow read: if signedIn()
+    && (isMember(leagueId) || isCreator(leagueId))
+    && (
+      resource.data.userDeleted != true
+      || canReadSensitive(leagueId)   // owner/HR
+      || canManageMembers(leagueId)   // opzionale, se vuoi
+    );
+
+  allow write: if false;
+}
+
+
+
+      match /membersArchive/{memberUid} {
+  allow read: if signedIn() && canReadSensitive(leagueId); // o canManageMembers(leagueId)
+  allow write: if false;
+}
+
+
+      // ---------------- ROLES ----------------
+      match /roles/{roleId} {
         allow read: if signedIn() && (isMember(leagueId) || isCreator(leagueId));
         allow write: if false;
       }
 
-      // PROFILE FIELD DEFINITIONS
-      match /profileFieldDefs/{fieldId} {
-        allow read: if signedIn() && (isMember(leagueId) || isCreator(leagueId));
-        allow write: if signedIn() && canManageMembers(leagueId);
-      }
-
-      // SHARE PREFERENCES (debug)
-      match /sharePreferences/{prefUid} {
-        allow read: if signedIn()
-          && (uid() == prefUid || canManageMembers(leagueId));
-        allow write: if false;
-      }
-
-      // sharedProfilesAll — LEAGUE
-      match /sharedProfilesAll/{profileUid} {
-        allow read: if signedIn() && (isMember(leagueId) || isCreator(leagueId));
-        allow write: if false;
-      }
-
-      // sharedProfilesTargets — EMAIL / UID
-      match /sharedProfilesTargets/{profileUid} {
-        allow read: if signedIn() && (
-          uid() == profileUid
-          || isCreator(leagueId)
-          || (
-            isMember(leagueId)
-            && (
-              (resource.data.allowedUids is list
-                && resource.data.allowedUids.hasAny([uid()]))
-              || (resource.data.allowedEmailsLower is list
-                && resource.data.allowedEmailsLower.hasAny([myEmailLower()]))
-            )
-          )
-        );
-        allow write: if false;
-      }
-
-      // sharedProfilesComparto
-      match /sharedProfilesComparto/{profileUid} {
-        allow read: if signedIn() && (
-          uid() == profileUid
-          || isCreator(leagueId)
-          || (
-            isMember(leagueId)
-            && resource.data.allowSameComparto == true
-            && myCompartoLower(leagueId) != ""
-            && myCompartoLower(leagueId)
-               == (resource.data.ownerCompartoLower != null
-                   ? resource.data.ownerCompartoLower
-                   : "")
-          )
-        );
-        allow write: if false;
-      }
-
-      // sharedProfilesSpecial
-      match /sharedProfilesSpecial/{profileUid} {
-        allow read: if signedIn() && (
-          uid() == profileUid
-          || isCreator(leagueId)
-          || (isMember(leagueId)
-              && resource.data.allowSpecial == true
-              && canReadSensitive(leagueId))
-        );
-        allow write: if false;
-      }
-
-      // sharedProfilesOwner
-      match /sharedProfilesOwner/{profileUid} {
-        allow read: if signedIn() && (
-          uid() == profileUid
-          || isCreator(leagueId)
-        );
-        allow write: if false;
-      }
-
-      // INVITES
+      // ---------------- INVITES ----------------
       match /invites/{inviteId} {
         allow read: if signedIn() && (
           canManageInvites(leagueId)
           || resource.data.emailLower == myEmailLower()
           || resource.data.toEmailLower == myEmailLower()
         );
-        allow create, update, delete: if signedIn() && canManageInvites(leagueId);
+        allow write: if false;
       }
 
-      // JOIN REQUESTS
+      // ---------------- JOIN REQUESTS ----------------
       match /joinRequests/{requestId} {
         allow create: if signedIn() && uid() == requestId;
-        allow read: if signedIn()
-          && (uid() == requestId || canManageMembers(leagueId));
-        allow update, delete: if signedIn() && isCreator(leagueId);
+        allow read: if signedIn() && (uid() == requestId || canManageMembers(leagueId));
+        allow write: if false;
       }
 
-      // ROLES
-      match /roles/{roleId} {
-        allow read: if signedIn() && (isMember(leagueId) || isCreator(leagueId));
-        allow create, update, delete: if signedIn() && canManageRoles(leagueId);
+      // ---------------- SHARED PROFILES ----------------
+      match /sharedProfilesAll/{profileUid} {
+        allow read: if signedIn() && isMember(leagueId);
+        allow write: if false;
       }
+
+      match /{sub=**} {
+        allow read, write: if false;
+      }
+    }
+
+    // =====================================================
+    // DEFAULT DENY
+    // =====================================================
+    match /{path=**} {
+      allow read, write: if false;
     }
   }
 }

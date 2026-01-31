@@ -2,49 +2,93 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
 
-    function signedIn() { return request.auth != null; }
+    // =====================
+    // HELPERS
+    // =====================
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function uid() {
+      return request.auth.uid;
+    }
+
     function isImage() {
       return request.resource != null
         && request.resource.contentType != null
         && request.resource.contentType.matches('image/.*');
     }
+
     function isPdf() {
       return request.resource != null
         && request.resource.contentType != null
         && request.resource.contentType == 'application/pdf';
     }
+
+    function allowedFileType() {
+      return isImage() || isPdf();
+    }
+
     function smallEnough(maxMb) {
       return request.resource != null
         && request.resource.size < maxMb * 1024 * 1024;
     }
-    function allowedFileType() { return isImage() || isPdf(); }
 
-    // ✅ PUBBLICO (foto profilo/cover)
-    match /users/{uid}/public/{rest=**} {
-      allow read: if signedIn();
+    // =====================================================
+    // 👤 USER PROFILE — MEDIA PUBBLICI
+    // Path: users/{uid}/public/*
+    // - foto profilo
+    // - cover
+    // =====================================================
+    match /users/{userId}/public/{file=**} {
+
+      // 🔓 LETTURA PUBBLICA (serve per UsersPublic e profili)
+      allow read: if true;
+
+      // ✍️ SCRITTURA SOLO SELF
       allow create, update: if signedIn()
-        && request.auth.uid == uid
+        && uid() == userId
         && allowedFileType()
         && smallEnough(5);
-      allow delete: if signedIn() && request.auth.uid == uid;
+
+      // 🗑️ CANCELLA SOLO SELF
+      allow delete: if signedIn() && uid() == userId;
     }
 
-    // ✅ PRIVATO (PDF e documenti utente)
-    match /users/{uid}/private/{rest=**} {
-      allow read: if signedIn() && request.auth.uid == uid;
+    // =====================================================
+    // 🔒 USER PRIVATE FILES
+    // Path: users/{uid}/private/*
+    // - documenti
+    // - pdf
+    // =====================================================
+    match /users/{userId}/private/{file=**} {
+
+      allow read: if signedIn() && uid() == userId;
+
       allow create, update: if signedIn()
-        && request.auth.uid == uid
+        && uid() == userId
         && allowedFileType()
         && smallEnough(5);
-      allow delete: if signedIn() && request.auth.uid == uid;
+
+      allow delete: if signedIn() && uid() == userId;
     }
 
+    // =====================================================
+    // 🏢 LEAGUE ICONS (SOLO BACKEND)
+    // Path: league_icons/{leagueId}.jpg
+    // =====================================================
     match /league_icons/{fileName} {
+
+      // 👀 leggibili da utenti autenticati
       allow read: if signedIn();
+
+      // ❌ client NON scrive MAI
       allow write: if false;
     }
 
-    // 🔒 default deny
+    // =====================================================
+    // ❌ DEFAULT DENY
+    // =====================================================
     match /{allPaths=**} {
       allow read, write: if false;
     }

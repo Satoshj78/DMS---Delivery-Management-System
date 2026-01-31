@@ -3,6 +3,7 @@
 
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:dms_app/features/access/league_picker_page.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
@@ -608,22 +609,17 @@ class _HomeShellState extends State<HomeShell> {
 
                       IconButton(
                         tooltip: 'Cambia League',
-                        onPressed: () async {
-                          final u = FirebaseAuth.instance.currentUser;
-                          if (u == null) return;
-                          await FirebaseFirestore.instance
-                              .collection('Users')
-                              .doc(u.uid)
-                              .set(
-                            {
-                              'activeLeagueId': null,
-                              'updatedAt': FieldValue.serverTimestamp()
-                            },
-                            SetOptions(merge: true),
+                        onPressed: () {
+                          Navigator.pushReplacement(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const LeaguePickerPage(),
+                            ),
                           );
                         },
                         icon: const Icon(Icons.swap_horiz),
                       ),
+
                       IconButton(
                         tooltip: 'Logout',
                         onPressed: () async {

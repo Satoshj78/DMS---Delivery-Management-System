@@ -270,8 +270,26 @@ class _UserDetailPageState extends State<UserDetailPage>
         required Map<String, dynamic> user,
         required Map<String, dynamic> member,
       }) {
-    _userValues = Map<String, dynamic>.from(user);
-    _memberValues = Map<String, dynamic>.from(member);
+    if (!_editMode) {
+      _userValues = _flattenUserDoc(user);
+      final mFields = (member['fields'] is Map)
+          ? Map<String, dynamic>.from(member['fields'] as Map)
+          : <String, dynamic>{};
+
+      _memberValues = mFields;
+    } else {
+      // in edit: aggiorna solo chiavi non toccate localmente (merge “gentile”)
+      final incomingUser = Map<String, dynamic>.from(user);
+      for (final e in incomingUser.entries) {
+        _userValues.putIfAbsent(e.key, () => e.value);
+      }
+
+      final incomingMember = Map<String, dynamic>.from(member);
+      for (final e in incomingMember.entries) {
+        _memberValues.putIfAbsent(e.key, () => e.value);
+      }
+    }
+
 
     final viewer = _viewerContext(targetUid: widget.userId);
     final canEditImages = viewer.isSelf;
@@ -590,6 +608,32 @@ class _UserDetailPageState extends State<UserDetailPage>
   }
 
 
+  Map<String, dynamic> _flattenUserDoc(Map<String, dynamic> doc) {
+    final out = <String, dynamic>{};
+
+    final profile = (doc['profile'] is Map) ? Map<String, dynamic>.from(doc['profile']) : <String, dynamic>{};
+    final custom = (profile['custom'] is Map) ? Map<String, dynamic>.from(profile['custom']) : <String, dynamic>{};
+    final privacy = (profile['privacy'] is Map) ? Map<String, dynamic>.from(profile['privacy']) : <String, dynamic>{};
+
+    // ✅ i campi “normali” sono quelli in custom
+    out.addAll(custom);
+
+    // ✅ policy: le mettiamo come "<field>__policy" per riusare _getPolicy()
+    for (final e in privacy.entries) {
+      out['${e.key}__policy'] = e.value;
+    }
+
+    // opzionale: tieni anche email top-level (Auth), se ti serve in UI
+    if ((doc['email'] ?? '').toString().trim().isNotEmpty) {
+      out['email'] = doc['email'];
+    }
+
+    return out;
+  }
+
+
+
+
 
   String _displayNameFromUser(Map<String, dynamic> u) {
     final ln = (u['lastName'] ?? u['cognome'] ?? '').toString().trim();
@@ -737,8 +781,10 @@ class _UserDetailPageState extends State<UserDetailPage>
         return const SizedBox.shrink();
       }
 
-      final canEdit =
-          _editMode && HrPolicyResolver.canEdit(policy: policy, viewer: viewer);
+      final canEdit = _editMode
+          && isUserTarget // ✅ SOLO user fields modificabili dal profilo
+          && HrPolicyResolver.canEdit(policy: policy, viewer: viewer);
+
 
       final value = isUserTarget ? _userValues[field.key] : _memberValues[field.key];
 
@@ -804,37 +850,54 @@ class _UserDetailPageState extends State<UserDetailPage>
 
 
 
-// ⚠️ ARCHITETTURA:
-// - Il client NON scrive MAI direttamente su Firestore
-// - Tutti i salvataggi profilo passano da Cloud Functions
-// - NON usare updateMyGlobalProfileAndSync / updateGlobalProfileAndSync
-  Future<void> _persistField(
-      bool isUserTarget,
-      String key,
-      dynamic value,
-      ) async {
+
+// ✅ ARCHITETTURA CORRETTA:
+// - Il client (SELF) scrive su Users/{uid}
+// - La Cloud Function onUserProfileWrite propaga su UsersPublic + members
+  Future<void> _persistField(bool isUserTarget, String key, dynamic value) async {
     if (!isUserTarget) {
-      throw StateError(
-        'Tentativo di scrittura MEMBER bloccato: solo Cloud Functions possono farlo',
-      );
-    }
-
-    final callable = FirebaseFunctions.instance
-        .httpsCallable('updateUserProfileField');
-
-    try {
-      await callable.call(<String, dynamic>{
-        'fieldKey': key,
-        'value': value,
-      });
-    } on FirebaseFunctionsException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message ?? 'Errore salvataggio')),
+          const SnackBar(content: Text('Questo campo è di lega (member) e non è modificabile dal profilo.')),
+        );
+      }
+      return;
+    }
+
+    final uid = widget.userId;
+    final userRef = FirebaseFirestore.instance.collection('Users').doc(uid);
+
+    try {
+      // ✅ policy -> profile.privacy.<field>
+      if (key.endsWith('__policy')) {
+        final realKey = key.replaceAll('__policy', '');
+        await userRef.set({
+          'profile': {
+            'privacy': { realKey: value }
+          },
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+        return;
+      }
+
+      // ✅ tutti i campi (anche nome/cognome/nickname/pensiero/photoUrl/coverUrl ecc.)
+      // vanno SEMPRE in profile.custom
+      await userRef.set({
+        'profile': {
+          'custom': { key: value }
+        },
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Errore salvataggio: $e')),
         );
       }
     }
   }
+
+
 
 
 
@@ -901,19 +964,43 @@ class _UserDetailPageState extends State<UserDetailPage>
       await ref.putData(jpeg, SettableMetadata(contentType: 'image/jpeg'));
       final url = await ref.getDownloadURL();
 
-      await FirebaseFunctions.instance.httpsCallable('updateUserProfileField').call({
-        'fieldKey': isCover ? 'coverUrl' : 'photoUrl',
-        'value': url,
-      });
+      final userRef = FirebaseFirestore.instance.collection('Users').doc(uid);
+
+      final field = isCover ? 'coverUrl' : 'photoUrl';
+      final vField = isCover ? 'coverV' : 'photoV';
+
+      // ✅ SALVA SOLO in profile.custom (coerente con la tua architettura)
+      // ✅ Versioning per cache-busting sempre in profile.custom
+      await userRef.set({
+        'profile': {
+          'custom': {
+            field: url,
+            vField: FieldValue.increment(1),
+          },
+        },
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
 
       if (!mounted) return;
+
+      // aggiorno subito lo stato locale per riflettere in UI
       setState(() {
-        _userValues[isCover ? 'coverUrl' : 'photoUrl'] = url;
+        _userValues[field] = url;
+        // opzionale: se vuoi aggiornare anche la V localmente senza leggere stream
+        final currentV = (_userValues[vField] is num) ? (_userValues[vField] as num).toInt() : 0;
+        _userValues[vField] = currentV + 1;
       });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Errore upload immagine: $e')),
+        );
+      }
     } finally {
       if (mounted) setState(() => _savingImage = false);
     }
   }
+
 
 
 }

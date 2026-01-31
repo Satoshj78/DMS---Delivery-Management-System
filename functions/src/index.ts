@@ -2,6 +2,8 @@ import * as admin from "firebase-admin";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onDocumentWritten } from "firebase-functions/v2/firestore";
 import * as crypto from "crypto";
+import { FieldPath } from "firebase-admin/firestore";
+
 
 admin.initializeApp();
 
@@ -35,15 +37,18 @@ function normalizeNickname(input: any): { nickname: string; lower: string } {
 
 async function setNicknameTxn(userId: string, nickname: string, lower: string) {
   const nickRef = db.collection("Nicknames").doc(lower);
-  const userRef = db.collection("Users").doc(userId);
+
+  // ✅ leggo PRIMA (fuori tx) l'eventuale vecchio nicknameLower, solo read
+  let oldLower = "";
+  try {
+    const userSnap = await db.collection("Users").doc(userId).get();
+    oldLower = ((userSnap.data()?.nicknameLower ?? "") as string).toLowerCase();
+  } catch (_) {}
 
   await db.runTransaction(async (tx) => {
-    const [nickSnap, userSnap] = await Promise.all([tx.get(nickRef), tx.get(userRef)]);
+    const nickSnap = await tx.get(nickRef);
 
-    if (!userSnap.exists) {
-      throw new HttpsError("failed-precondition", "Profilo utente non trovato.");
-    }
-
+    // se nickname già preso da altro uid → KO
     if (nickSnap.exists) {
       const ownerUid = (nickSnap.data()?.uid ?? "") as string;
       if (ownerUid && ownerUid !== userId) {
@@ -51,7 +56,7 @@ async function setNicknameTxn(userId: string, nickname: string, lower: string) {
       }
     }
 
-    const oldLower = ((userSnap.data()?.nicknameLower ?? "") as string).toLowerCase();
+    // libera eventuale vecchio nickname (se era mio)
     if (oldLower && oldLower !== lower) {
       const oldRef = db.collection("Nicknames").doc(oldLower);
       const oldSnap = await tx.get(oldRef);
@@ -60,6 +65,7 @@ async function setNicknameTxn(userId: string, nickname: string, lower: string) {
       }
     }
 
+    // ✅ scrivo SOLO su Nicknames
     tx.set(
       nickRef,
       {
@@ -70,26 +76,22 @@ async function setNicknameTxn(userId: string, nickname: string, lower: string) {
       },
       { merge: true }
     );
-
-    tx.set(
-      userRef,
-      {
-        nickname,
-        nicknameLower: lower,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
   });
 }
+
 
 export const setNickname = onCall({ region: REGION }, async (req) => {
   const userId = requireAuth(req);
   const { nickname, lower } = normalizeNickname(req.data?.nickname);
 
   await setNicknameTxn(userId, nickname, lower);
+
+  // ✅ Il client aggiorna Users/{uid}.profile.custom.nickname ecc.
   return { ok: true, nickname, nicknameLower: lower };
 });
+
+
+
 
 /**
  * ✅ Campi SEMPRE pubblici (enforced server-side)
@@ -200,81 +202,23 @@ const SENSITIVE_FIELDS = new Set<string>([
 // =====================================================
 // ✅ UPDATE MY PROFILE (SERVER-DRIVEN)
 // =====================================================
-export const updateMyProfile = onCall({ region: REGION }, async (req) => {
-  const uid = requireAuth(req);
-
-  const fields = req.data?.fields ?? {};
-  const privacyPatch = req.data?.privacy ?? {};
-
-  if (typeof fields !== "object" || fields === null || Array.isArray(fields)) {
-    throw new HttpsError("invalid-argument", "fields non valido");
-  }
-  if (typeof privacyPatch !== "object" || privacyPatch === null || Array.isArray(privacyPatch)) {
-    throw new HttpsError("invalid-argument", "privacy non valido");
-  }
-
-  const userRef = db.collection("Users").doc(uid);
-  const snap = await userRef.get();
-  if (!snap.exists) throw new HttpsError("not-found", "Utente non trovato");
-
-  const prev = (snap.data() ?? {}) as Record<string, any>;
-  const prevProfile = (prev.profile ?? {}) as Record<string, any>;
-  const prevCustom = (prevProfile.custom ?? {}) as Record<string, any>;
-  const prevPrivacy = (prevProfile.privacy ?? {}) as Record<string, any>;
-
-  // ✅ MERGE custom (non perdere campi non inviati)
-  const nextCustom: Record<string, any> = { ...prevCustom };
-  for (const [k, v] of Object.entries(fields)) nextCustom[k] = v;
-
-  // ✅ MERGE privacy (non perdere campi non inviati)
-  const nextPrivacy: Record<string, any> = { ...prevPrivacy, ...privacyPatch };
-
-  await userRef.set(
-    {
-      profile: {
-        custom: nextCustom,
-        privacy: nextPrivacy,
-      },
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    },
-    { merge: true }
+export const updateMyProfile = onCall({ region: REGION }, async (_req) => {
+  throw new HttpsError(
+    "failed-precondition",
+    "updateMyProfile disabilitata: il client deve scrivere direttamente su Users/{uid}. Le functions propagano soltanto."
   );
+});
 
-  return { ok: true };
+export const updateUserProfileField = onCall({ region: REGION }, async (_req) => {
+  throw new HttpsError(
+    "failed-precondition",
+    "updateUserProfileField disabilitata: il client deve scrivere direttamente su Users/{uid}. Le functions propagano soltanto."
+  );
 });
 
 
 
 
-
-
-
-export const updateUserProfileField = onCall({ region: REGION }, async (req) => {
-  const uid = requireAuth(req);
-  const fieldKey = (req.data?.fieldKey ?? "").toString().trim();
-  const value = req.data?.value;
-
-  if (!fieldKey) throw new HttpsError("invalid-argument", "fieldKey mancante");
-
-  const userRef = db.collection("Users").doc(uid);
-  const snap = await userRef.get();
-  if (!snap.exists) throw new HttpsError("not-found", "Utente non trovato");
-
-  // ✅ write SOLO dentro profile.custom
-  await userRef.set(
-    {
-      profile: {
-        custom: {
-          [fieldKey]: value,
-        },
-      },
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    },
-    { merge: true }
-  );
-
-  return { ok: true };
-});
 
 
 
@@ -303,21 +247,28 @@ function asInt(v: any): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-async function ensureUserDoc(uid: string) {
-  const u = await admin.auth().getUser(uid);
-  const email = u.email ?? "";
-  const emailLower = email.toLowerCase();
-  await db.collection("Users").doc(uid).set(
-    {
-      uid,
-      email,
-      emailLower,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    },
-    { merge: true }
-  );
-  return { email, emailLower };
+
+
+
+function callerEmailFromAuth(req: any): { email: string; emailLower: string } {
+  const email = (req.auth?.token?.email ?? "").toString().trim();
+  return { email, emailLower: email ? email.toLowerCase() : "" };
 }
+
+async function readUserDocIfExists(uid: string): Promise<Record<string, any>> {
+  try {
+    const snap = await db.collection("Users").doc(uid).get();
+    return (snap.exists ? (snap.data() ?? {}) : {}) as Record<string, any>;
+  } catch {
+    return {};
+  }
+}
+
+
+
+
+
+
 
 // ------------------------
 // PUBLIC PROFILE PARSING
@@ -329,9 +280,21 @@ function resolvePublicFromUserDoc(
   const profile = (u?.profile ?? {}) as Record<string, any>;
   const custom = (profile?.custom ?? {}) as Record<string, any>;
 
-  // ✅ Priorità: profile.custom -> profile.* -> top-level legacy
-  const nome = (custom?.nome ?? profile?.nome ?? u?.nome ?? "").toString().trim();
-  const cognome = (custom?.cognome ?? profile?.cognome ?? u?.cognome ?? "").toString().trim();
+  // ✅ PRIORITÀ: profile.custom -> (alias) -> legacy
+  const nome =
+    (custom?.nome ??
+      custom?.firstName ?? // alias
+      profile?.nome ??
+      u?.nome ??
+      "").toString().trim();
+
+  const cognome =
+    (custom?.cognome ??
+      custom?.lastName ?? // alias
+      profile?.cognome ??
+      u?.cognome ??
+      "").toString().trim();
+
   const nickname = (custom?.nickname ?? profile?.nickname ?? u?.nickname ?? "").toString().trim();
 
   const photoUrl = (custom?.photoUrl ?? profile?.photoUrl ?? u?.photoUrl ?? "").toString().trim();
@@ -360,6 +323,8 @@ function resolvePublicFromUserDoc(
     emailLower,
   };
 }
+
+
 
 
 async function getLeaguePublicProfile(
@@ -423,6 +388,38 @@ function memberPublicFields(pub: {
 
 
 
+// ✅ SOLO campi "pubblici" da mettere dentro members.fields (niente derived)
+function buildMemberFieldsPayload(pub: {
+  nome: string;
+  cognome: string;
+  displayName: string;
+  nickname?: string;
+  photoUrl?: string;
+  photoV?: number;
+  coverUrl?: string;
+  coverV?: number;
+  email: string;
+  emailLower: string;
+}) {
+  return {
+    nome: (pub.nome ?? "").toString().trim() || null,
+    cognome: (pub.cognome ?? "").toString().trim() || null,
+    displayName: (pub.displayName ?? "").toString().trim() || null,
+    nickname: (pub.nickname ?? "").toString().trim() || null,
+
+    photoUrl: (pub.photoUrl ?? "").toString().trim() || null,
+    photoV: asInt(pub.photoV ?? 0),
+
+    coverUrl: (pub.coverUrl ?? "").toString().trim() || null,
+    coverV: asInt(pub.coverV ?? 0),
+
+    emailLogin: (pub.email ?? "").toString().trim() || null,
+    emailLower: (pub.emailLower ?? "").toString().trim() || null,
+  };
+}
+
+
+
 
 
 
@@ -435,125 +432,352 @@ function memberPublicFields(pub: {
 // - sharePreferences: salva le preferenze di condivisione per ogni lega
 // Supporta campi dinamici (custom) creati dalle leghe
 // ======================================================
+
+
+
+
+
+
+// ======================================================
+// ✅ AUTO-SYNC PROFILO SELETTIVO + PULIZIA (privacy-based)
+// Trigger: qualsiasi modifica in Users/{uid}
+// - UsersPublic: SOLO campi con mode = "publicGlobal" (+ ALWAYS_PUBLIC)
+// - members: campi con mode = "publicLeague" + "publicGlobal" (+ ALWAYS_PUBLIC)
+// - pulizia: se un campo era pubblico prima e ora non lo è più → delete
+// ======================================================
 export const onUserProfileWrite = onDocumentWritten(
   { region: REGION, document: "Users/{uid}" },
   async (event) => {
     const uid = event.params.uid;
     const afterSnap = event.data?.after;
+    const beforeSnap = event.data?.before;
 
-    // 🧹 Utente eliminato
-    if (!afterSnap?.exists) {
-      await db.collection("UsersPublic").doc(uid).delete().catch(() => {});
-      return;
+    // ----------------------------
+// 🧹 DELETE USER (account eliminato)
+// - elimina UsersPublic (sparisce dalle ricerche globali)
+// - libera Nicknames/{nicknameLower}
+// - per ogni lega: salva snapshot storico in membersArchive/{uid}
+//   poi anonimizza members/{uid} (userDeleted=true)
+// ----------------------------
+if (!afterSnap?.exists) {
+  // 1) ELIMINA traccia globale
+  await db.collection("UsersPublic").doc(uid).delete().catch(() => {});
+
+  // 2) Libera nickname globale (se presente nel BEFORE)
+  try {
+    const beforeData = (beforeSnap?.exists ? (beforeSnap.data() ?? {}) : {}) as Record<string, any>;
+    const beforeProfile = (beforeData.profile ?? {}) as Record<string, any>;
+    const beforeCustom = (beforeProfile.custom ?? {}) as Record<string, any>;
+
+    const oldLower = (
+      beforeData.nicknameLower ??
+      beforeCustom.nicknameLower ??
+      beforeCustom.nickname ??
+      ""
+)
+.toString()
+.toLowerCase()
+.trim();
+
+    if (oldLower) {
+      await db.collection("Nicknames").doc(oldLower).delete().catch(() => {});
     }
+  } catch (_) {}
 
-    const afterData = afterSnap.data() ?? {};
-    const profile = afterData.profile ?? {};
+  // 3) Trova tutti i member docs dell’utente in tutte le leghe
+  const memberQs = await db.collectionGroup("members").where("uid", "==", uid).get();
 
-    const custom: Record<string, any> =
-      typeof profile.custom === "object" && !Array.isArray(profile.custom)
-        ? { ...profile.custom }
-        : {};
+  const docsToUpdate = memberQs.empty
+    ? (await db.collectionGroup("members").where(FieldPath.documentId(), "==", uid).get()).docs
+    : memberQs.docs;
 
-    const privacy: Record<string, any> =
-      typeof profile.privacy === "object" ? profile.privacy : {};
+  if (docsToUpdate.length === 0) return;
 
-    // ----------------------------
-    // 🔎 MODE RESOLVER
-    // ----------------------------
-    function getMode(fieldKey: string): string {
-  // fieldKey può essere: "nome" oppure "custom.nome"
-  const rawKey = fieldKey.startsWith("custom.") ? fieldKey.substring("custom.".length) : fieldKey;
+  // 4) BulkWriter (più veloce e meno timeout)
+  const writer = db.bulkWriter();
 
-  // ✅ sempre pubblici (chiave raw)
-  if (ALWAYS_PUBLIC_FIELDS.has(rawKey)) return "public";
+  for (const d of docsToUpdate) {
+    const leagueRef = d.ref.parent.parent; // Leagues/{leagueId}
+    if (!leagueRef) continue;
 
-  const p = privacy[rawKey] ?? privacy[fieldKey] ?? {};
-  const mode = (p.mode ?? "").toString().toLowerCase();
+    const snapData = d.data() ?? {};
 
-  if (mode) return mode;
-  if (SENSITIVE_FIELDS.has(rawKey)) return "private";
-  return "private";
+    // 4a) ARCHIVIO storico (admin-only)
+    const archiveRef = leagueRef.collection("membersArchive").doc(uid);
+    writer.set(
+      archiveRef,
+      {
+        uid,
+        archivedAt: admin.firestore.FieldValue.serverTimestamp(),
+        snapshot: snapData,
+      },
+      { merge: true }
+    );
+
+    // 4b) ANONIMIZZA member
+    writer.set(
+      d.ref,
+      {
+        userDeleted: true,
+        userDeletedAt: admin.firestore.FieldValue.serverTimestamp(),
+        archived: true,
+
+        // campi pubblici "neutri" in fields
+        fields: {
+          nome: null,
+          cognome: null,
+          displayName: "Utente eliminato",
+          nickname: null,
+          photoUrl: null,
+          photoV: 0,
+          coverUrl: null,
+          coverV: 0,
+          emailLogin: null,
+          emailLower: null,
+        },
+
+        // derived per ricerche: svuota tutto
+        displayName: "Utente eliminato",
+        displayNameLower: "",
+        fullNameLower: "",
+        reverseNameLower: "",
+        nicknameLower: "",
+        displayNomeLower: "",
+        displayCognomeLower: "",
+        emailLower: "",
+
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  }
+
+  await writer.close().catch(() => {});
+  return;
 }
 
 
+
+
+    const afterData = (afterSnap.data() ?? {}) as Record<string, any>;
+    const beforeData = (beforeSnap?.exists ? (beforeSnap.data() ?? {}) : {}) as Record<string, any>;
+
+    const afterProfile = (afterData.profile ?? {}) as Record<string, any>;
+    const afterCustom = { ...((afterProfile.custom ?? {}) as Record<string, any>) };
+    const afterPrivacy = (afterProfile.privacy ?? {}) as Record<string, any>;
+
+    const beforeProfile = (beforeData.profile ?? {}) as Record<string, any>;
+    const beforeCustom = { ...((beforeProfile.custom ?? {}) as Record<string, any>) };
+    const beforePrivacy = (beforeProfile.privacy ?? {}) as Record<string, any>;
+
     // ----------------------------
-    // 🎯 FILTRI
+    // 🔐 PRIVACY RESOLVER
     // ----------------------------
-    function filterCustomByModes(modes: string[]) {
-      const out: Record<string, any> = {};
-      for (const [k, v] of Object.entries(custom)) {
-        const mode = getMode(`custom.${k}`);
-        if (modes.includes(mode)) out[k] = v;
-      }
-      return out;
+    function getModeFrom(privacyObj: any, rawKey: string): string {
+      // Always public forzato
+      if (ALWAYS_PUBLIC_FIELDS.has(rawKey)) return "publicGlobal";
+
+      const p = privacyObj?.[rawKey] ?? {};
+      const modeRaw = (p?.mode ?? p?.visibility ?? "").toString().trim();
+      const mode = modeRaw.toLowerCase();
+
+      // canonici
+      if (mode === "publicglobal") return "publicGlobal";
+      if (mode === "publicleague") return "publicLeague";
+
+      // retrocompat
+      if (mode === "public") return "publicGlobal";
+      if (mode === "league") return "publicLeague";
+      if (mode === "private") return "private";
+      if (mode === "uids") return "uids";
+      if (mode === "emails") return "emails";
+
+      // default
+      if (SENSITIVE_FIELDS.has(rawKey)) return "private";
+      return "private";
     }
 
-    const profilePublic = filterCustomByModes(["public"]);
+    // ----------------------------
+    // 🧽 Normalizza valori "svuotati"
+    // ----------------------------
+    function normalizePublicValue(v: any): any {
+      if (v === undefined || v === null) return null;
 
+      if (typeof v === "string") {
+        const t = v.trim();
+        return t.length ? t : null;
+      }
+
+      if (Array.isArray(v)) {
+        return v.length ? v : null;
+      }
+
+      if (typeof v === "object") {
+        const keys = Object.keys(v);
+        return keys.length ? v : null;
+      }
+
+      return v;
+    }
 
     // ----------------------------
-    // 👤 PROFILO PUBBLICO BASE
+    // 🎯 PUBLIC FIELDS (AFTER)
+    // ----------------------------
+    const globalPublicCustom: Record<string, any> = {}; // -> UsersPublic (+ anche members)
+    const leaguePublicCustom: Record<string, any> = {}; // -> solo members (include anche global)
+
+    for (const [k, v] of Object.entries(afterCustom)) {
+      const m = getModeFrom(afterPrivacy, k);
+
+      if (m === "publicGlobal") {
+        const nv = normalizePublicValue(v);
+        globalPublicCustom[k] = nv;
+        leaguePublicCustom[k] = nv;
+      } else if (m === "publicLeague") {
+        leaguePublicCustom[k] = normalizePublicValue(v);
+      }
+    }
+
+    // ----------------------------
+    // 🎯 PUBLIC FIELDS (BEFORE) per pulizia
+    // ----------------------------
+    const beforeGlobalPublicCustom: Record<string, any> = {};
+    const beforeLeaguePublicCustom: Record<string, any> = {};
+
+    for (const [k, v] of Object.entries(beforeCustom)) {
+      const m = getModeFrom(beforePrivacy, k);
+
+      if (m === "publicGlobal") {
+        const nv = normalizePublicValue(v);
+        beforeGlobalPublicCustom[k] = nv;
+        beforeLeaguePublicCustom[k] = nv;
+      } else if (m === "publicLeague") {
+        beforeLeaguePublicCustom[k] = normalizePublicValue(v);
+      }
+    }
+
+    // ----------------------------
+    // 👤 BASE PUBLIC PROFILE (AFTER)
     // ----------------------------
     const pub = resolvePublicFromUserDoc(afterData);
     const derived = memberPublicFields(pub);
 
-    // forza always-public
-    if (pub.nome) profilePublic.nome = pub.nome;
-    if (pub.cognome) profilePublic.cognome = pub.cognome;
-    if (pub.nickname) profilePublic.nickname = pub.nickname;
-    if (pub.photoUrl) profilePublic.photoUrl = pub.photoUrl;
-    profilePublic.photoV = pub.photoV;
-    if (pub.coverUrl) profilePublic.coverUrl = pub.coverUrl;
-    profilePublic.coverV = pub.coverV;
+    // ✅ ALWAYS PUBLIC: forzali nel GLOBAL (e quindi anche nel LEAGUE)
+    globalPublicCustom.nome = normalizePublicValue(pub.nome);
+    globalPublicCustom.cognome = normalizePublicValue(pub.cognome);
+    globalPublicCustom.nickname = normalizePublicValue(pub.nickname);
+    globalPublicCustom.photoUrl = normalizePublicValue(pub.photoUrl);
+    globalPublicCustom.coverUrl = normalizePublicValue(pub.coverUrl);
+    globalPublicCustom.photoV = asInt(pub.photoV ?? 0);
+    globalPublicCustom.coverV = asInt(pub.coverV ?? 0);
+
+    // alias sempre propagati (null se vuoti)
+    globalPublicCustom.pensiero = normalizePublicValue(afterCustom?.pensiero);
+    globalPublicCustom.thought = normalizePublicValue(afterCustom?.thought);
+
+    // include i global anche nel league
+    Object.assign(leaguePublicCustom, globalPublicCustom);
 
     // ----------------------------
-    // 📦 PAYLOADS
+    // 👤 BASE PUBLIC PROFILE (BEFORE) per pulizia
     // ----------------------------
-    const payloadUsersPublic = {
-      uid,
-      fields: profilePublic,
-      ...derived,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    };
+    const beforePub = resolvePublicFromUserDoc(beforeData);
 
-    const payloadMembers = {
-      uid,
-      ...profilePublic,
-      ...derived,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    };
+    beforeGlobalPublicCustom.nome = normalizePublicValue(beforePub.nome);
+    beforeGlobalPublicCustom.cognome = normalizePublicValue(beforePub.cognome);
+    beforeGlobalPublicCustom.nickname = normalizePublicValue(beforePub.nickname);
+    beforeGlobalPublicCustom.photoUrl = normalizePublicValue(beforePub.photoUrl);
+    beforeGlobalPublicCustom.coverUrl = normalizePublicValue(beforePub.coverUrl);
+    beforeGlobalPublicCustom.photoV = asInt(beforePub.photoV ?? 0);
+    beforeGlobalPublicCustom.coverV = asInt(beforePub.coverV ?? 0);
+    beforeGlobalPublicCustom.pensiero = normalizePublicValue(beforeCustom?.pensiero);
+    beforeGlobalPublicCustom.thought = normalizePublicValue(beforeCustom?.thought);
+
+    Object.assign(beforeLeaguePublicCustom, beforeGlobalPublicCustom);
 
     // ----------------------------
-    // 1️⃣ UsersPublic
+    // 🧹 DELETE MAPS
+    // - UsersPublic: cancella SOLO campi che prima erano GLOBAL e ora NON lo sono più
+    // - Members: cancella campi che prima erano LEAGUE (o GLOBAL) e ora NON lo sono più
     // ----------------------------
-    if (Object.keys(profilePublic).length > 0) {
-      await db
-        .collection("UsersPublic")
-        .doc(uid)
-        .set(payloadUsersPublic, { merge: false });
-    } else {
-      await db.collection("UsersPublic").doc(uid).delete().catch(() => {});
+
+    // ✅ FIX: deletes "robusti" dentro fields (non fields.k con path a punti)
+    const usersPublicFieldDeletes: Record<string, any> = {};
+    for (const k of Object.keys(beforeGlobalPublicCustom)) {
+      if (!(k in globalPublicCustom)) {
+        usersPublicFieldDeletes[k] = admin.firestore.FieldValue.delete();
+      }
     }
 
-    // ----------------------------
-    // 2️⃣ Members (tutte le leghe)
-    // ----------------------------
-    const leagueIds: string[] = Array.isArray(afterData.leagueIds)
-      ? afterData.leagueIds
-      : [];
-
-    for (const leagueId of leagueIds) {
-      const mRef = db
-        .collection("Leagues")
-        .doc(leagueId)
-        .collection("members")
-        .doc(uid);
-
-      await mRef.set(payloadMembers, { merge: true });
+    const memberDeletes: Record<string, any> = {};
+    for (const k of Object.keys(beforeLeaguePublicCustom)) {
+      if (!(k in leaguePublicCustom)) {
+        memberDeletes[k] = admin.firestore.FieldValue.delete();
+      }
     }
+
+        // ----------------------------
+    // 📦 USERS PUBLIC (SOLO GLOBAL)
+    // ----------------------------
+    await db.collection("UsersPublic").doc(uid).set(
+      {
+        uid,
+        fields: {
+          ...globalPublicCustom,
+          ...usersPublicFieldDeletes,
+        },
+        ...derived,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+// ----------------------------
+// 🔁 MEMBERS (ALL LEAGUES)
+// ✅ Metodo robusto: aggiorna direttamente tutti i docs members del uid
+// ----------------------------
+const memberDocs = await db
+  .collectionGroup("members")
+  .where("uid", "==", uid)
+  .get();
+
+// fallback: se per qualche lega il campo uid manca, prova anche per documentId
+const docsToUpdate = memberDocs.empty
+  ? (await db
+      .collectionGroup("members")
+      .where(FieldPath.documentId(), "==", uid)
+      .get()).docs
+  : memberDocs.docs;
+
+console.log("onUserProfileWrite uid:", uid, "members found:", docsToUpdate.length);
+
+for (const d of docsToUpdate) {
+  await d.ref.set(
+    {
+      uid,
+      // ✅ TUTTI i campi "pubblici" vanno dentro fields (come UsersPublic)
+      fields: {
+        ...leaguePublicCustom,
+        ...memberDeletes,
+      },
+      // ✅ derived rimane a root
+      ...derived,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+// 👇 chiudi SOLO il trigger
   }
 );
+
+
+
+
+
+
+
 
 
 // ======================================================
@@ -626,26 +850,34 @@ export const createLeague = onCall({ region: REGION }, async (req) => {
   const nome = (req.data?.nome ?? "").toString().trim();
   if (!nome) throw new HttpsError("invalid-argument", "Nome mancante.");
 
-  // ✅ nuovi campi richiesti al creatore
   const creatorNome = (req.data?.creatorNome ?? "").toString().trim();
   const creatorCognome = (req.data?.creatorCognome ?? "").toString().trim();
   if (!creatorNome || !creatorCognome) {
     throw new HttpsError("invalid-argument", "Inserisci Nome e Cognome del creatore.");
   }
 
-  const ensured = await ensureUserDoc(uid);
+  const { email, emailLower } = callerEmailFromAuth(req);
 
-  // ✅ prendo eventuali photo/cover/nickname già presenti
-  const userSnap = await db.collection("Users").doc(uid).get();
-  const u0 = (userSnap.data() ?? {}) as Record<string, any>;
+  const u0 = await readUserDocIfExists(uid);
+  const p0 = (u0.profile ?? {}) as Record<string, any>;
+  const c0 = (p0.custom ?? {}) as Record<string, any>;
 
-  // ✅ costruisco pub usando i valori inseriti (Cognome Nome)
-  const pub = resolvePublicFromUserDoc(
-    { ...u0, nome: creatorNome, cognome: creatorCognome },
-    ensured
-  );
+  const simulatedAfter = {
+    ...u0,
+    email: u0.email ?? email,
+    emailLower: u0.emailLower ?? emailLower,
+    profile: {
+      ...p0,
+      custom: {
+        ...c0,
+        nome: creatorNome,
+        cognome: creatorCognome,
+      },
+    },
+  };
 
-  // joinCode unico
+  const pub = resolvePublicFromUserDoc(simulatedAfter, { email, emailLower });
+
   let joinCode = randomJoinCode(6);
   for (let i = 0; i < 10; i++) {
     const q = await db.collection("Leagues").where("joinCode", "==", joinCode).limit(1).get();
@@ -656,7 +888,6 @@ export const createLeague = onCall({ region: REGION }, async (req) => {
   const leagueRef = db.collection("Leagues").doc();
   const leagueId = leagueRef.id;
 
-  // logo
   let logoUrl = "";
   const logoBase64 = (req.data?.logoBase64 ?? "").toString().trim();
   const logoContentType = (req.data?.logoContentType ?? "image/jpeg").toString();
@@ -698,37 +929,43 @@ export const createLeague = onCall({ region: REGION }, async (req) => {
       { merge: true }
     );
 
-    // ✅ member creato dalla function (no bootstrap dal client)
-    const memberRef = leagueRef.collection("members").doc(uid);
-    tx.set(
-      memberRef,
-      {
-        uid,
-        roleId: "OWNER",
-        joinCode,
-        ...memberPublicFields(pub),
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
 
-    // ✅ aggiorno Users (server-side): nome/cognome + activeLeagueId
-    tx.set(
-      db.collection("Users").doc(uid),
-      {
-        nome: creatorNome,
-        cognome: creatorCognome,
-        activeLeagueId: leagueId,
-        leagueIds: admin.firestore.FieldValue.arrayUnion(leagueId),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
+    const memberRef = leagueRef.collection("members").doc(uid);
+
+const derived = memberPublicFields(pub);              // ✅ derived a root (ricerche/ordinamenti)
+const fieldsPayload = buildMemberFieldsPayload(pub);  // ✅ SOLO valori pubblici dentro fields
+
+tx.set(
+  memberRef,
+  {
+    uid,
+    roleId: "OWNER",
+    joinCode,
+
+    // ✅ campi pubblici "canonici"
+    fields: fieldsPayload,
+
+    // ✅ derived a root (displayNameLower, fullNameLower, ecc.)
+    ...derived,
+
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  },
+  { merge: true }
+);
+
+
+
+    // ❌ NON SCRIVERE SU USERS
   });
 
+  // ✅ Il client farà:
+  // Users/{uid}.activeLeagueId = leagueId
+  // Users/{uid}.leagueIds = arrayUnion(leagueId)
   return { ok: true, leagueId, joinCode, logoUrl };
 });
+
+
 
 
 // ------------------------
@@ -736,19 +973,29 @@ export const createLeague = onCall({ region: REGION }, async (req) => {
 // ------------------------
 export const listLeaguesForUser = onCall({ region: REGION }, async (req) => {
   const uid = requireAuth(req);
-  const { emailLower } = await ensureUserDoc(uid);
+  const { emailLower } = callerEmailFromAuth(req);
 
-  const userSnap = await db.collection("Users").doc(uid).get();
-  const u = userSnap.data() ?? {};
-  const activeLeagueId = (u.activeLeagueId ?? "").toString().trim();
+  // ✅ activeLeagueId: leggilo solo se Users esiste (read-only)
+  let activeLeagueId = "";
+  try {
+    const userSnap = await db.collection("Users").doc(uid).get();
+    const u = userSnap.data() ?? {};
+    activeLeagueId = (u.activeLeagueId ?? "").toString().trim();
+  } catch (_) {}
 
-  let leagueIds: string[] = Array.isArray(u.leagueIds)
-    ? u.leagueIds.map((x: any) => (x ?? "").toString()).filter(Boolean)
-    : [];
+  // ✅ leagueIds: preferisci da Users se c’è (read-only), altrimenti group query members
+  let leagueIds: string[] = [];
+  try {
+    const userSnap = await db.collection("Users").doc(uid).get();
+    const u = userSnap.data() ?? {};
+    leagueIds = Array.isArray(u.leagueIds)
+      ? u.leagueIds.map((x: any) => (x ?? "").toString()).filter(Boolean)
+      : [];
+  } catch (_) {}
 
   if (leagueIds.length === 0) {
     try {
-      const qs = await db.collectionGroup("members").where("uid", "==", uid).limit(100).get();
+      const qs = await db.collectionGroup("members").where("uid", "==", uid).limit(200).get();
       leagueIds = qs.docs.map((d) => d.ref.parent.parent?.id ?? "").filter(Boolean);
     } catch (_) {}
   }
@@ -773,8 +1020,10 @@ export const listLeaguesForUser = onCall({ region: REGION }, async (req) => {
     return a.nome.toLowerCase().localeCompare(b.nome.toLowerCase());
   });
 
+  // ✅ inviti: query per emailLower (se vuota → niente inviti)
   const invitedMap = new Map<string, any>();
   async function runInviteQuery(field: string) {
+    if (!emailLower) return;
     try {
       const qs = await db.collectionGroup("invites").where(field, "==", emailLower).limit(200).get();
       for (const doc of qs.docs) {
@@ -813,6 +1062,7 @@ export const listLeaguesForUser = onCall({ region: REGION }, async (req) => {
   return { ok: true, activeLeagueId, joined, invited };
 });
 
+
 // ------------------------
 // SET ACTIVE LEAGUE
 // ------------------------
@@ -824,13 +1074,11 @@ export const setActiveLeague = onCall({ region: REGION }, async (req) => {
   const m = await db.collection("Leagues").doc(leagueId).collection("members").doc(uid).get();
   if (!m.exists) throw new HttpsError("permission-denied", "Non sei membro di questa lega.");
 
-  await db.collection("Users").doc(uid).set(
-    { activeLeagueId: leagueId, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
-    { merge: true }
-  );
-
+  // ❌ NON scrive Users
+  // ✅ Il client aggiorna Users/{uid}.activeLeagueId
   return { ok: true, leagueId };
 });
+
 
 // ------------------------
 // ACCEPT INVITE
@@ -841,8 +1089,9 @@ export const acceptInvite = onCall({ region: REGION }, async (req) => {
   const inviteId = (req.data?.inviteId ?? "").toString().trim();
   if (!leagueId || !inviteId) throw new HttpsError("invalid-argument", "Parametri mancanti.");
 
-  const ensured = await ensureUserDoc(uid);
-  const pub = await getLeaguePublicProfile(uid, ensured);
+  const { email, emailLower } = callerEmailFromAuth(req);
+const pub = await getLeaguePublicProfile(uid, { email, emailLower });
+
 
   const leagueRef = db.collection("Leagues").doc(leagueId);
   const invRef = leagueRef.collection("invites").doc(inviteId);
@@ -872,18 +1121,26 @@ export const acceptInvite = onCall({ region: REGION }, async (req) => {
       tx.set(leagueRef, { memberCount: admin.firestore.FieldValue.increment(1) }, { merge: true });
     }
 
-    tx.set(
-      memberRef,
-      {
-        uid,
-        roleId: computedRoleId,
-        joinCode: joinCode || null,
-        ...memberPublicFields(pub),
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
+
+const derived = memberPublicFields(pub);
+const fieldsPayload = buildMemberFieldsPayload(pub);
+
+tx.set(
+  memberRef,
+  {
+    uid,
+    roleId: computedRoleId,
+    joinCode: joinCode || null,
+
+    fields: fieldsPayload,
+    ...derived,
+
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  },
+  { merge: true }
+);
+
 
     tx.set(
       invRef,
@@ -896,15 +1153,6 @@ export const acceptInvite = onCall({ region: REGION }, async (req) => {
       { merge: true }
     );
 
-    tx.set(
-      db.collection("Users").doc(uid),
-      {
-        activeLeagueId: leagueId,
-        leagueIds: admin.firestore.FieldValue.arrayUnion(leagueId),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
   });
 
   return { ok: true, leagueId, inviteId, roleId: outRoleId };
@@ -918,8 +1166,9 @@ export const requestJoinByCode = onCall({ region: REGION }, async (req) => {
   const joinCode = (req.data?.joinCode ?? "").toString().trim().toUpperCase();
   if (!joinCode) throw new HttpsError("invalid-argument", "JoinCode mancante");
 
-  const ensured = await ensureUserDoc(uid);
-  const pub = await getLeaguePublicProfile(uid, ensured);
+  const { email, emailLower } = callerEmailFromAuth(req);
+const pub = await getLeaguePublicProfile(uid, { email, emailLower });
+
 
   const q = await db.collection("Leagues").where("joinCodeUpper", "==", joinCode).limit(1).get();
   if (q.empty) throw new HttpsError("not-found", "JoinCode non trovato");
@@ -929,14 +1178,7 @@ export const requestJoinByCode = onCall({ region: REGION }, async (req) => {
 
   const memberSnap = await leagueRef.collection("members").doc(uid).get();
   if (memberSnap.exists) {
-    await db.collection("Users").doc(uid).set(
-      {
-        activeLeagueId: leagueId,
-        leagueIds: admin.firestore.FieldValue.arrayUnion(leagueId),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
+
     return { ok: true, leagueId, alreadyMember: true, alreadyRequested: false };
   }
 
@@ -947,16 +1189,27 @@ export const requestJoinByCode = onCall({ region: REGION }, async (req) => {
     return { ok: true, leagueId, alreadyMember: false, alreadyRequested: true };
   }
 
-  await reqRef.set(
-    {
-      uid,
-      status: "pending",
-      ...memberPublicFields(pub),
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    },
-    { merge: true }
-  );
+
+  const derived = memberPublicFields(pub);
+const fieldsPayload = buildMemberFieldsPayload(pub);
+
+await reqRef.set(
+  {
+    uid,
+    status: "pending",
+
+    // ✅ stessa struttura dei members
+    fields: fieldsPayload,
+
+    // ✅ derived a root (ricerche/ordinamenti)
+    ...derived,
+
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  },
+  { merge: true }
+);
+
 
   return { ok: true, leagueId, alreadyMember: false, alreadyRequested: false };
 });
@@ -1031,8 +1284,8 @@ async function respondToJoinRequestImpl(
   if (preStatus !== "pending") throw new HttpsError("failed-precondition", "Richiesta già gestita");
 
   const targetUid = (preData.uid ?? requestId).toString().trim();
-  const ensuredTarget = await ensureUserDoc(targetUid);
-  const pubTarget = await getLeaguePublicProfile(targetUid, ensuredTarget);
+  const pubTarget = await getLeaguePublicProfile(targetUid, undefined);
+
 
   await db.runTransaction(async (tx) => {
     const reqSnap = await tx.get(reqRef);
@@ -1064,27 +1317,26 @@ async function respondToJoinRequestImpl(
       tx.set(leagueRef, { memberCount: admin.firestore.FieldValue.increment(1) }, { merge: true });
     }
 
-    tx.set(
-      memberRef,
-      {
-        uid: targetUid,
-        roleId,
-        ...memberPublicFields(pubTarget),
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
 
-    tx.set(
-      db.collection("Users").doc(targetUid),
-      {
-        activeLeagueId: leagueId,
-        leagueIds: admin.firestore.FieldValue.arrayUnion(leagueId),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
+
+const derived = memberPublicFields(pubTarget);
+const fieldsPayload = buildMemberFieldsPayload(pubTarget);
+
+tx.set(
+  memberRef,
+  {
+    uid: targetUid,
+    roleId,
+
+    fields: fieldsPayload,
+    ...derived,
+
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  },
+  { merge: true }
+);
+
 
     tx.set(
       reqRef,
@@ -1119,3 +1371,22 @@ export const acceptJoinRequest = onCall({ region: REGION }, async (req) => {
 
   return respondToJoinRequestImpl(req, { leagueId, requestId: requesterUid, accept: true });
 });
+
+
+
+export const deleteMyAccount = onCall({ region: REGION }, async (req) => {
+  const uid = requireAuth(req);
+
+  // (Opzionale) elimina file Storage utente se li hai in un prefix noto
+  // Esempio:
+  // await bucket.deleteFiles({ prefix: `users/${uid}/` }).catch(() => {});
+
+  // 1) Cancella Users/{uid} con Admin SDK → farà scattare onUserProfileWrite (branch delete)
+  await db.collection("Users").doc(uid).delete().catch(() => {});
+
+  // 2) Cancella Firebase Auth user
+  await admin.auth().deleteUser(uid).catch(() => {});
+
+  return { ok: true };
+});
+

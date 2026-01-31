@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 import 'package:dms_app/core/service/league/dms_league_api.dart';
@@ -69,23 +70,25 @@ class LeagueService {
     return res;
   }
 
-  /// ✅ Se sei già membro, puoi SOLO impostare activeLeagueId sul tuo Users/{uid}
-  /// (non tocchiamo members o league doc)
+
+
+  /// ✅ Se sei già membro, puoi SOLO CHIEDERE AL SERVER
+  /// di impostare activeLeagueId sul tuo Users/{uid}
+  /// ✅ Entra in una league già esistente
+  /// → imposta activeLeagueId SOLO via Cloud Function
   static Future<void> enterLeagueById(String leagueId) async {
     final u = FirebaseAuth.instance.currentUser;
     if (u == null) throw StateError('Not logged');
 
-    final userRef = await _ensureUserDoc();
-
     final id = leagueId.trim();
     if (id.isEmpty) throw ArgumentError('leagueId vuoto');
 
-    await userRef.set({
-      'activeLeagueId': id,
-      'leagueIds': FieldValue.arrayUnion([id]),
-      'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    // 🔥 UNICA COSA CONSENTITA
+    await FirebaseFunctions.instance
+        .httpsCallable('setActiveLeague')
+        .call({'leagueId': id});
   }
+
 
   /// ✅ Accetta invito da:
   /// - "leagueId:inviteId"
@@ -167,13 +170,5 @@ class LeagueService {
   }
 
 
-  static Future<void> clearActiveLeague() async {
-    final u = FirebaseAuth.instance.currentUser;
-    if (u == null) return;
 
-    await _db.collection('Users').doc(u.uid).set(
-      {'activeLeagueId': null},
-      SetOptions(merge: true),
-    );
-  }
 }

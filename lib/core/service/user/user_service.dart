@@ -1115,6 +1115,56 @@ class UserService {
 
 
 
+
+  // ==========================================================
+  // ✅ DIRECT WRITE (self) su Users/{uid}
+  // Usalo SOLO per bootstrap iniziale (nome/cognome) prima di createLeague,
+  // cosi' la Cloud Function onUserProfileWrite propaga su UsersPublic + members.
+  // ==========================================================
+  static Future<void> bootstrapMyNameOnUsers({
+    required String nome,
+    required String cognome,
+  }) async {
+    final me = FirebaseAuth.instance.currentUser;
+    if (me == null) throw StateError('Not logged');
+
+    final nomeClean = nome.trim();
+    final cognomeClean = cognome.trim();
+
+    if (nomeClean.isEmpty || cognomeClean.isEmpty) {
+      throw StateError('Nome e Cognome non possono essere vuoti.');
+    }
+
+    // ✅ privacy “forzata” public per questi campi (coerente con la tua policy)
+    final privacyPublic = {
+      'mode': 'public',
+      'leagueScopes': <String, String>{},
+      'allLeagues': false,
+      'allLeaguesScope': 'ALL_MEMBERS',
+      'users': <String>[],
+      'emails': <String>[],
+      'compartos': <String>[],
+    };
+
+    await userRef(me.uid).set({
+      'profile': {
+        'nome': nomeClean,
+        'cognome': cognomeClean,
+        'privacy': {
+          'nome': privacyPublic,
+          'cognome': privacyPublic,
+        },
+      },
+      'updatedAt': FieldValue.serverTimestamp(),
+      // se il doc non esiste, mettiamo createdAt
+      'createdAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+
+
+
+
 }
 
 
