@@ -12,6 +12,10 @@ const bucket = admin.storage().bucket();
 
 // ✅ Regione principale
 const REGION = "europe-west1";
+const SYNC_VERSION = "sync-2026-01-31-members-v3";
+const DEBUG_SYNC = true; // metti false quando hai finito
+
+
 
 // =====================================================
 // ✅ Nickname registry (global uniqueness)
@@ -452,6 +456,48 @@ export const onUserProfileWrite = onDocumentWritten(
     const afterSnap = event.data?.after;
     const beforeSnap = event.data?.before;
 
+
+
+// ---------- DEBUG HELPERS ----------
+const runId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+async function debugSet(data: Record<string, any>) {
+  if (!DEBUG_SYNC) return;
+  try {
+    await db.collection("_debugSync").doc(uid).set(
+      {
+        uid,
+        runId,
+        syncVersion: SYNC_VERSION,
+        ...data,
+        ts: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  } catch (_) {}
+}
+
+console.log("[SYNC]", SYNC_VERSION, "runId:", runId, "uid:", uid, "afterExists:", !!afterSnap?.exists);
+await debugSet({ stage: "start", afterExists: !!afterSnap?.exists });
+// -----------------------------------
+
+
+
+
+// 🔥 HEARTBEAT: ogni volta che la function gira, scrive qui
+await db.collection("_debugSync").doc(uid).set(
+  {
+    uid,
+    syncVersion: SYNC_VERSION,
+    ranAt: admin.firestore.FieldValue.serverTimestamp(),
+    afterExists: !!afterSnap?.exists,
+  },
+  { merge: true }
+);
+
+
+
+
     // ----------------------------
 // 🧹 DELETE USER (account eliminato)
 // - elimina UsersPublic (sparisce dalle ricerche globali)
@@ -574,28 +620,32 @@ if (!afterSnap?.exists) {
     // 🔐 PRIVACY RESOLVER
     // ----------------------------
     function getModeFrom(privacyObj: any, rawKey: string): string {
-      // Always public forzato
-      if (ALWAYS_PUBLIC_FIELDS.has(rawKey)) return "publicGlobal";
+  // Always public forzato
+  if (ALWAYS_PUBLIC_FIELDS.has(rawKey)) return "publicGlobal";
 
-      const p = privacyObj?.[rawKey] ?? {};
-      const modeRaw = (p?.mode ?? p?.visibility ?? "").toString().trim();
-      const mode = modeRaw.toLowerCase();
+  const p = privacyObj?.[rawKey] ?? {};
+  const modeRaw = (p?.mode ?? p?.visibility ?? "").toString().trim();
+  const mode = modeRaw.toLowerCase();
 
-      // canonici
-      if (mode === "publicglobal") return "publicGlobal";
-      if (mode === "publicleague") return "publicLeague";
+  // canonici
+  if (mode === "publicglobal") return "publicGlobal";
+  if (mode === "publicleague") return "publicLeague";
 
-      // retrocompat
-      if (mode === "public") return "publicGlobal";
-      if (mode === "league") return "publicLeague";
-      if (mode === "private") return "private";
-      if (mode === "uids") return "uids";
-      if (mode === "emails") return "emails";
+  // ✅ alias che nel tuo progetto può comparire (plural)
+  if (mode === "publicleagues") return "publicLeague";
 
-      // default
-      if (SENSITIVE_FIELDS.has(rawKey)) return "private";
-      return "private";
-    }
+  // retrocompat
+  if (mode === "public") return "publicGlobal";
+  if (mode === "league") return "publicLeague";
+  if (mode === "private") return "private";
+  if (mode === "uids") return "uids";
+  if (mode === "emails") return "emails";
+
+  // default
+  if (SENSITIVE_FIELDS.has(rawKey)) return "private";
+  return "private";
+}
+
 
     // ----------------------------
     // 🧽 Normalizza valori "svuotati"
@@ -719,9 +769,17 @@ if (!afterSnap?.exists) {
         // ----------------------------
     // 📦 USERS PUBLIC (SOLO GLOBAL)
     // ----------------------------
+
+
+await debugSet({
+  stage: "before_usersPublic_write",
+  globalKeys: Object.keys(globalPublicCustom).slice(0, 50),
+});
+
     await db.collection("UsersPublic").doc(uid).set(
       {
         uid,
+__syncVersion: SYNC_VERSION, // 👈 marker
         fields: {
           ...globalPublicCustom,
           ...usersPublicFieldDeletes,
@@ -732,41 +790,126 @@ if (!afterSnap?.exists) {
       { merge: true }
     );
 
-// ----------------------------
-// 🔁 MEMBERS (ALL LEAGUES)
-// ✅ Metodo robusto: aggiorna direttamente tutti i docs members del uid
-// ----------------------------
-const memberDocs = await db
-  .collectionGroup("members")
-  .where("uid", "==", uid)
-  .get();
+await debugSet({ stage: "after_usersPublic_write" });
 
-// fallback: se per qualche lega il campo uid manca, prova anche per documentId
-const docsToUpdate = memberDocs.empty
-  ? (await db
-      .collectionGroup("members")
-      .where(FieldPath.documentId(), "==", uid)
-      .get()).docs
-  : memberDocs.docs;
 
-console.log("onUserProfileWrite uid:", uid, "members found:", docsToUpdate.length);
+// ----------------------------
+// 🔁 MEMBERS (ALL LEAGUES) — LOG POTENTE (uid field)
+// ----------------------------
+await debugSet({ stage: "before_members_query" });
+
+let docsToUpdate: FirebaseFirestore.QueryDocumentSnapshot[] = [];
+
+try {
+  const qs = await db
+    .collectionGroup("members")
+    .where("uid", "==", uid)
+    .get();
+
+  docsToUpdate = qs.docs;
+
+  // log base
+  console.log("[SYNC]", SYNC_VERSION, "members found by uid field:", docsToUpdate.length);
+
+  // sample + primi path
+  const samplePath = docsToUpdate[0]?.ref?.path ?? null;
+  const firstPaths = docsToUpdate.slice(0, 10).map((d) => d.ref.path);
+
+  console.log("[SYNC]", SYNC_VERSION, "members samplePath:", samplePath);
+  console.log("[SYNC]", SYNC_VERSION, "members firstPaths(<=10):", firstPaths);
+
+  await debugSet({
+    stage: "members_query_ok",
+    membersFound: docsToUpdate.length,
+    samplePath,
+    firstPaths,
+  });
+} catch (err: any) {
+  console.error("[SYNC] members query failed:", err);
+  await debugSet({
+    stage: "members_query_failed",
+    error: String(err?.message ?? err),
+  });
+  return;
+}
+
+if (docsToUpdate.length === 0) {
+  console.log("[SYNC] NO members docs found for uid:", uid);
+  await debugSet({
+    stage: "members_none",
+    hint:
+      "Nessun /Leagues/{leagueId}/members con campo uid==uid trovato. Possibile: members creati senza campo uid.",
+  });
+  return;
+}
+
+const writer = db.bulkWriter();
+const errors: any[] = [];
+
+writer.onWriteError((error) => {
+  const e = {
+    path: error.documentRef?.path ?? null,
+    message: (error as any)?.message ?? "unknown",
+    code: (error as any)?.code ?? null,
+    failedAttempts: error.failedAttempts,
+  };
+  errors.push(e);
+  console.error("[SYNC] BulkWriter error:", e);
+  // retry 1 volta
+  return error.failedAttempts < 2;
+});
 
 for (const d of docsToUpdate) {
-  await d.ref.set(
+  writer.set(
+    d.ref,
     {
       uid,
-      // ✅ TUTTI i campi "pubblici" vanno dentro fields (come UsersPublic)
+      __syncVersion: SYNC_VERSION, // marker visibile sul doc member
+
       fields: {
         ...leaguePublicCustom,
         ...memberDeletes,
       },
-      // ✅ derived rimane a root
+
       ...derived,
+
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     },
     { merge: true }
   );
 }
+
+try {
+  await writer.close();
+  console.log("[SYNC] members updated OK:", docsToUpdate.length);
+
+  await debugSet({
+    stage: "members_write_done",
+    membersUpdated: docsToUpdate.length,
+    errorsCount: errors.length,
+    errorsSample: errors.slice(0, 5),
+  });
+} catch (err: any) {
+  console.error("[SYNC] writer.close failed:", err);
+  await debugSet({
+    stage: "members_write_close_failed",
+    error: String(err?.message ?? err),
+    errorsCount: errors.length,
+    errorsSample: errors.slice(0, 5),
+  });
+}
+
+
+
+
+
+
+
+
+
+
+
+
 
 // 👇 chiudi SOLO il trigger
   }
@@ -1389,4 +1532,55 @@ export const deleteMyAccount = onCall({ region: REGION }, async (req) => {
 
   return { ok: true };
 });
+
+
+
+
+
+
+export const debugForceSyncMyMembers = onCall({ region: REGION }, async (req) => {
+  const uid = requireAuth(req);
+
+  const userSnap = await db.collection("Users").doc(uid).get();
+  if (!userSnap.exists) throw new HttpsError("not-found", "Users doc not found");
+
+  const afterData = (userSnap.data() ?? {}) as Record<string, any>;
+  const pub = resolvePublicFromUserDoc(afterData);
+  const derived = memberPublicFields(pub);
+
+  // qui non applichiamo privacy: mettiamo SOLO ALWAYS_PUBLIC per test
+  const leaguePublicCustom: Record<string, any> = {};
+  leaguePublicCustom.nome = (pub.nome ?? null);
+  leaguePublicCustom.cognome = (pub.cognome ?? null);
+  leaguePublicCustom.nickname = (pub.nickname ?? null);
+  leaguePublicCustom.photoUrl = (pub.photoUrl ?? null);
+  leaguePublicCustom.coverUrl = (pub.coverUrl ?? null);
+  leaguePublicCustom.photoV = asInt(pub.photoV ?? 0);
+  leaguePublicCustom.coverV = asInt(pub.coverV ?? 0);
+
+  const qs = await db
+    .collectionGroup("members")
+    .where(FieldPath.documentId(), "==", uid)
+    .get();
+
+  const writer = db.bulkWriter();
+  for (const d of qs.docs) {
+    writer.set(
+      d.ref,
+      {
+        uid,
+        fields: {
+          ...leaguePublicCustom,
+        },
+        ...derived,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  }
+  await writer.close();
+
+  return { ok: true, membersUpdated: qs.docs.length };
+});
+
 
